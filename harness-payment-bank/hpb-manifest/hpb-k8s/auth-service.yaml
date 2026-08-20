@@ -1,0 +1,117 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: auth-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: auth-service
+  template:
+    metadata:
+      labels:
+        app: auth-service
+    spec:
+      initContainers:
+      - name: init-db
+        image: postgres:16
+        env:
+        - name: PGHOST
+          value: "postgresql"
+        - name: PGPORT
+          value: "5432"
+        - name: PGUSER
+          valueFrom:
+            secretKeyRef:
+              name: banking-secrets
+              key: POSTGRES_USER
+        - name: PGPASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: banking-secrets
+              key: POSTGRES_PASSWORD
+        command:
+        - sh
+        - -c
+        - |
+          until pg_isready -h postgresql -U $PGUSER; do
+            echo "Waiting for PostgreSQL to be ready..."
+            sleep 2
+          done
+          echo "PostgreSQL is ready. Checking if auth database exists..."
+          if ! psql -lqt | cut -d \| -f 1 | grep -qw auth; then
+            echo "Creating auth database..."
+            psql -c "CREATE DATABASE auth;"
+            echo "Auth database created successfully."
+          else
+            echo "Auth database already exists."
+          fi
+      containers:
+      - name: auth-service
+        image: aady12/hpb-auth-service:0.0.3
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 10070
+          name: http
+        env:
+        - name: SPRING_PROFILES_ACTIVE
+          value: "prod,native"
+        - name: SPRING_CONFIG_IMPORT
+          value: "optional:configserver:http://config-server:8888"
+        - name: EUREKA_CLIENT_SERVICEURL_DEFAULTZONE
+          valueFrom:
+            configMapKeyRef:
+              name: banking-config
+              key: EUREKA_SERVER_URL
+        - name: SPRING_DATASOURCE_URL
+          value: "jdbc:postgresql://postgresql:5432/auth"
+        - name: SPRING_DATASOURCE_USERNAME
+          valueFrom:
+            secretKeyRef:
+              name: banking-secrets
+              key: POSTGRES_USER
+        - name: SPRING_DATASOURCE_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: banking-secrets
+              key: POSTGRES_PASSWORD
+        - name: SPRING_JPA_HIBERNATE_DDL_AUTO
+          value: "update"
+        - name: SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI
+          value: "http://keycloak:8080/realms/banking"
+        - name: MANAGEMENT_ZIPKIN_TRACING_ENDPOINT
+          value: "http://zipkin:9411/api/v2/spans"
+        - name: MANAGEMENT_ENDPOINTS_WEB_EXPOSURE_INCLUDE
+          value: "health,info,metrics,prometheus"
+        - name: EUREKA_INSTANCE_PREFER_IP_ADDRESS
+          value: "true"
+        - name: EUREKA_INSTANCE_HOSTNAME
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        # livenessProbe:
+        #   httpGet:
+        #     path: /actuator/health
+        #     port: 10070
+        #   initialDelaySeconds: 120
+        #   periodSeconds: 10
+        # readinessProbe:
+        #   httpGet:
+        #     path: /actuator/health
+        #     port: 10070
+        #   initialDelaySeconds: 90
+        #   periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: auth-service
+spec:
+  selector:
+    app: auth-service
+  ports:
+  - port: 8060
+    targetPort: 10070
+    protocol: TCP
+  type: ClusterIP

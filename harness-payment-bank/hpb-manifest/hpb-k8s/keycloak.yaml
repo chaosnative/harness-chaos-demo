@@ -1,0 +1,109 @@
+# ---
+# apiVersion: apps/v1
+# kind: Deployment
+# metadata:
+#   name: keycloak
+# spec:
+#   replicas: 1
+#   selector:
+#     matchLabels:
+#       app: keycloak
+#   template:
+#     metadata:
+#       labels:
+#         app: keycloak
+#     spec:
+#       initContainers:
+#       - name: init-db
+#         image: postgres:16
+#         env:
+#         - name: PGHOST
+#           value: "postgresql"
+#         - name: PGPORT
+#           value: "5432"
+#         - name: PGUSER
+#           valueFrom:
+#             secretKeyRef:
+#               name: banking-secrets
+#               key: POSTGRES_USER
+#         - name: PGPASSWORD
+#           valueFrom:
+#             secretKeyRef:
+#               name: banking-secrets
+#               key: POSTGRES_PASSWORD
+#         command:
+#         - sh
+#         - -c
+#         - |
+#           until pg_isready -h postgresql -U $PGUSER; do
+#             echo "Waiting for PostgreSQL to be ready..."
+#             sleep 2
+#           done
+#           echo "PostgreSQL is ready. Checking if keycloak database exists..."
+#           if ! psql -lqt | cut -d \| -f 1 | grep -qw keycloak; then
+#             echo "Creating keycloak database..."
+#             psql -c "CREATE DATABASE keycloak;"
+#             echo "Keycloak database created successfully."
+#           else
+#             echo "Keycloak database already exists."
+#           fi
+#       containers:
+#       - name: keycloak
+#         image: quay.io/keycloak/keycloak:24.0.2
+#         args:
+#         - start-dev
+#         ports:
+#         - containerPort: 8080
+#           name: http
+#         env:
+#         - name: KEYCLOAK_ADMIN
+#           valueFrom:
+#             secretKeyRef:
+#               name: banking-secrets
+#               key: KEYCLOAK_ADMIN
+#         - name: KEYCLOAK_ADMIN_PASSWORD
+#           valueFrom:
+#             secretKeyRef:
+#               name: banking-secrets
+#               key: KEYCLOAK_ADMIN_PASSWORD
+#         - name: KC_DB
+#           value: "postgres"
+#         - name: KC_DB_URL
+#           value: "jdbc:postgresql://postgresql:5432/keycloak"
+#         - name: KC_DB_USERNAME
+#           valueFrom:
+#             secretKeyRef:
+#               name: banking-secrets
+#               key: POSTGRES_USER
+#         - name: KC_DB_PASSWORD
+#           valueFrom:
+#             secretKeyRef:
+#               name: banking-secrets
+#               key: POSTGRES_PASSWORD
+#         - name: KC_HEALTH_ENABLED
+#           value: "true"
+#         livenessProbe:
+#           httpGet:
+#             path: /health/live
+#             port: 8080
+#           initialDelaySeconds: 120
+#           periodSeconds: 10
+#         readinessProbe:
+#           httpGet:
+#             path: /health/ready
+#             port: 8080
+#           initialDelaySeconds: 60
+#           periodSeconds: 5
+# ---
+# apiVersion: v1
+# kind: Service
+# metadata:
+#   name: keycloak
+# spec:
+#   selector:
+#     app: keycloak
+#   ports:
+#   - port: 8080
+#     targetPort: 8080
+#     protocol: TCP
+#   type: ClusterIP

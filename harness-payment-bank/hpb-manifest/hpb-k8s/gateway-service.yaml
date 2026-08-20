@@ -1,0 +1,115 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gateway-service
+  template:
+    metadata:
+      labels:
+        app: gateway-service
+    spec:
+      containers:
+      - name: gateway-service
+        image: docker.io/aady12/hpb-gateway-service:0.0.5
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8222
+          name: http
+        env:
+        - name: SPRING_PROFILES_ACTIVE
+          value: "prod,native"
+        - name: SPRING_KAFKA_BOOTSTRAP_SERVERS
+          value: "kafka-service:9092"
+        - name: SPRING_KAFKA_PRODUCER_ACKS
+          value: "all"
+        - name: SPRING_KAFKA_PRODUCER_RETRIES
+          value: "10"
+        - name: SPRING_KAFKA_PRODUCER_PROPERTIES_MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION
+          value: "5"
+        - name: SPRING_KAFKA_PRODUCER_PROPERTIES_ENABLE_IDEMPOTENCE
+          value: "true"
+        - name: SPRING_KAFKA_PRODUCER_PROPERTIES_REQUEST_TIMEOUT_MS
+          value: "30000"
+        - name: SPRING_KAFKA_PRODUCER_PROPERTIES_DELIVERY_TIMEOUT_MS
+          value: "120000"
+        - name: SERVER_PORT
+          value: "8080"
+        - name: EUREKA_CLIENT_ENABLED
+          value: "false"
+        - name: SPRING_CLOUD_GATEWAY_ROUTES_0_ID
+          value: "transaction-service"
+        - name: SPRING_CLOUD_GATEWAY_ROUTES_0_URI
+          value: "http://transaction-service:10090"
+        - name: SPRING_CLOUD_GATEWAY_ROUTES_0_PREDICATES_0
+          value: "Path=/api/v1/transactions/**"
+        - name: SPRING_CLOUD_GATEWAY_ROUTES_1_ID
+          value: "account-service"
+        - name: SPRING_CLOUD_GATEWAY_ROUTES_1_URI
+          value: "http://account-service:10080"
+        - name: SPRING_CLOUD_GATEWAY_ROUTES_1_PREDICATES_0
+          value: "Path=/api/v1/accounts/**"
+        - name: SPRING_CLOUD_GATEWAY_ROUTES_2_ID
+          value: "auth-service"
+        - name: SPRING_CLOUD_GATEWAY_ROUTES_2_URI
+          value: "http://auth-service:8060"
+        - name: SPRING_CLOUD_GATEWAY_ROUTES_2_PREDICATES_0
+          value: "Path=/api/v1/auth/**"
+        - name: SPRING_CLOUD_GATEWAY_ROUTES_3_ID
+          value: "loan-service"
+        - name: SPRING_CLOUD_GATEWAY_ROUTES_3_URI
+          value: "http://loan-service:10060"
+        - name: SPRING_CLOUD_GATEWAY_ROUTES_3_PREDICATES_0
+          value: "Path=/api/v1/loans/**"
+        - name: SPRING_CLOUD_GATEWAY_ROUTES_4_ID
+          value: "notification-service"
+        - name: SPRING_CLOUD_GATEWAY_ROUTES_4_URI
+          value: "http://notification-service:10050"
+        - name: SPRING_CLOUD_GATEWAY_ROUTES_4_PREDICATES_0
+          value: "Path=/api/v1/notifications/**"
+        - name: SPRING_CLOUD_GATEWAY_GLOBALCORS_CORSCONFIGURATIONS_[/**]_ALLOWEDORIGINS
+          value: "*"
+        - name: SPRING_CLOUD_GATEWAY_GLOBALCORS_CORSCONFIGURATIONS_[/**]_ALLOWEDMETHODS
+          value: "*"
+        - name: SPRING_CLOUD_GATEWAY_GLOBALCORS_CORSCONFIGURATIONS_[/**]_ALLOWEDHEADERS
+          value: "*"
+        - name: MANAGEMENT_ENDPOINTS_WEB_EXPOSURE_INCLUDE
+          value: "health,info,metrics,prometheus"
+        - name: SPRING_CONFIG_IMPORT
+          value: "optional:configserver:http://config-server:8888"
+        - name: EUREKA_CLIENT_SERVICEURL_DEFAULTZONE
+          valueFrom:
+            configMapKeyRef:
+              name: banking-config
+              key: EUREKA_SERVER_URL
+        - name: MANAGEMENT_ZIPKIN_TRACING_ENDPOINT
+          value: "http://zipkin:9411/api/v2/spans"
+        # livenessProbe:
+        #   httpGet:
+        #     path: /actuator/health
+        #     port: 8222
+        #   initialDelaySeconds: 120
+        #   periodSeconds: 10
+        # readinessProbe:
+        #   httpGet:
+        #     path: /actuator/health
+        #     port: 8222
+        #   initialDelaySeconds: 90
+        #   periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gateway-service
+spec:
+  selector:
+    app: gateway-service
+  ports:
+  - port: 8080
+    targetPort: 8080
+    protocol: TCP
+  type: LoadBalancer

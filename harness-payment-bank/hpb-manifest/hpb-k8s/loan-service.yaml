@@ -1,0 +1,132 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loan-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: loan-service
+  template:
+    metadata:
+      labels:
+        app: loan-service
+    spec:
+      initContainers:
+      - name: init-db
+        image: postgres:16
+        env:
+        - name: PGHOST
+          value: "postgresql"
+        - name: PGPORT
+          value: "5432"
+        - name: PGUSER
+          valueFrom:
+            secretKeyRef:
+              name: banking-secrets
+              key: POSTGRES_USER
+        - name: PGPASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: banking-secrets
+              key: POSTGRES_PASSWORD
+        command:
+        - sh
+        - -c
+        - |
+          until pg_isready -h postgresql -U $PGUSER; do
+            echo "Waiting for PostgreSQL to be ready..."
+            sleep 2
+          done
+          echo "PostgreSQL is ready. Checking if loan database exists..."
+          if ! psql -lqt | cut -d \| -f 1 | grep -qw loan; then
+            echo "Creating loan database..."
+            psql -c "CREATE DATABASE loan;"
+            echo "Loan database created successfully."
+          else
+            echo "Loan database already exists."
+          fi
+      containers:
+      - name: loan-service
+        image: aady12/hpb-loan-service:0.0.2
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 10060
+          name: http
+        env:
+        - name: SPRING_PROFILES_ACTIVE
+          value: "prod,native"
+        - name: SPRING_CONFIG_IMPORT
+          value: "optional:configserver:http://config-server:8888"
+        - name: EUREKA_CLIENT_SERVICEURL_DEFAULTZONE
+          valueFrom:
+            configMapKeyRef:
+              name: banking-config
+              key: EUREKA_SERVER_URL
+        - name: SPRING_DATASOURCE_URL
+          value: "jdbc:postgresql://postgresql:5432/loan"
+        - name: SPRING_DATASOURCE_USERNAME
+          valueFrom:
+            secretKeyRef:
+              name: banking-secrets
+              key: POSTGRES_USER
+        - name: SPRING_DATASOURCE_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: banking-secrets
+              key: POSTGRES_PASSWORD
+        - name: SPRING_JPA_HIBERNATE_DDL_AUTO
+          value: "update"
+        - name: SPRING_KAFKA_BOOTSTRAP_SERVERS
+          valueFrom:
+            configMapKeyRef:
+              name: banking-config
+              key: KAFKA_BOOTSTRAP_SERVERS
+        - name: SPRING_KAFKA_PRODUCER_ACKS
+          value: "all"
+        - name: SPRING_KAFKA_PRODUCER_RETRIES
+          value: "10"
+        - name: SPRING_KAFKA_PRODUCER_PROPERTIES_MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION
+          value: "5"
+        - name: SPRING_KAFKA_PRODUCER_PROPERTIES_ENABLE_IDEMPOTENCE
+          value: "true"
+        - name: SPRING_KAFKA_PRODUCER_PROPERTIES_REQUEST_TIMEOUT_MS
+          value: "30000"
+        - name: SPRING_KAFKA_PRODUCER_PROPERTIES_DELIVERY_TIMEOUT_MS
+          value: "120000"
+        - name: MANAGEMENT_ZIPKIN_TRACING_ENDPOINT
+          value: "http://zipkin:9411/api/v2/spans"
+        - name: MANAGEMENT_ENDPOINTS_WEB_EXPOSURE_INCLUDE
+          value: "health,info,metrics,prometheus"
+        - name: EUREKA_INSTANCE_PREFER_IP_ADDRESS
+          value: "true"
+        - name: EUREKA_INSTANCE_HOSTNAME
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        livenessProbe:
+          httpGet:
+            path: /actuator/health
+            port: 10060
+          initialDelaySeconds: 120
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /actuator/health
+            port: 10060
+          initialDelaySeconds: 90
+          periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: loan-service
+spec:
+  selector:
+    app: loan-service
+  ports:
+  - port: 10060
+    targetPort: 10060
+    protocol: TCP
+  type: ClusterIP

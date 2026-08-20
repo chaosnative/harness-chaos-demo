@@ -1,0 +1,41 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mail-dev
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mail-dev
+  template:
+    metadata:
+      labels:
+        app: mail-dev
+    spec:
+      containers:
+      - name: mail-dev
+        image: maildev/maildev:latest
+        ports:
+        - containerPort: 1080
+          name: web
+        - containerPort: 1025
+          name: smtp
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mail-dev
+spec:
+  selector:
+    app: mail-dev
+  ports:
+  - port: 1080
+    targetPort: 1080
+    protocol: TCP
+    name: web
+  - port: 1025
+    targetPort: 1025
+    protocol: TCP
+    name: smtp
+  type: ClusterIP

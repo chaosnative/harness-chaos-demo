@@ -1,0 +1,172 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+      evaluation_interval: 15s
+      external_labels:
+        cluster: 'banking-cluster'
+        environment: 'production'
+
+    scrape_configs:
+      # Scrape Prometheus itself
+      - job_name: 'prometheus'
+        static_configs:
+          - targets: ['localhost:9090']
+
+      # Scrape Gateway Service
+      - job_name: 'gateway-service'
+        metrics_path: '/actuator/prometheus'
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names:
+                - banking
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_app]
+            action: keep
+            regex: gateway-service
+          - source_labels: [__meta_kubernetes_pod_ip]
+            action: replace
+            target_label: __address__
+            replacement: ${1}:8080
+
+      # Scrape Auth Service
+      - job_name: 'auth-service'
+        metrics_path: '/actuator/prometheus'
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names:
+                - banking
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_app]
+            action: keep
+            regex: auth-service
+          - source_labels: [__meta_kubernetes_pod_ip]
+            action: replace
+            target_label: __address__
+            replacement: ${1}:10070
+
+      # Scrape Account Service
+      - job_name: 'account-service'
+        metrics_path: '/actuator/prometheus'
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names:
+                - banking
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_app]
+            action: keep
+            regex: account-service
+          - source_labels: [__meta_kubernetes_pod_ip]
+            action: replace
+            target_label: __address__
+            replacement: ${1}:10080
+
+      # Scrape Transaction Service
+      - job_name: 'transaction-service'
+        metrics_path: '/actuator/prometheus'
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names:
+                - banking
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_app]
+            action: keep
+            regex: transaction-service
+          - source_labels: [__meta_kubernetes_pod_ip]
+            action: replace
+            target_label: __address__
+            replacement: ${1}:10090
+
+      # Scrape Loan Service
+      - job_name: 'loan-service'
+        metrics_path: '/actuator/prometheus'
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names:
+                - banking
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_app]
+            action: keep
+            regex: loan-service
+          - source_labels: [__meta_kubernetes_pod_ip]
+            action: replace
+            target_label: __address__
+            replacement: ${1}:10060
+
+      # Scrape Validator Service
+      - job_name: 'validator-service'
+        metrics_path: '/actuator/prometheus'
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names:
+                - banking
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_app]
+            action: keep
+            regex: validator-service
+          - source_labels: [__meta_kubernetes_pod_ip]
+            action: replace
+            target_label: __address__
+            replacement: ${1}:8086
+
+      # Scrape Notification Service
+      - job_name: 'notification-service'
+        metrics_path: '/actuator/prometheus'
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names:
+                - banking
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_app]
+            action: keep
+            regex: notification-service
+          - source_labels: [__meta_kubernetes_pod_ip]
+            action: replace
+            target_label: __address__
+            replacement: ${1}:10050
+
+      # Scrape Config Server
+      - job_name: 'config-server'
+        metrics_path: '/actuator/prometheus'
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names:
+                - banking
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_app]
+            action: keep
+            regex: config-server
+          - source_labels: [__meta_kubernetes_pod_ip]
+            action: replace
+            target_label: __address__
+            replacement: ${1}:8888
+
+      # Scrape Discovery/Eureka Service
+      - job_name: 'discovery-service'
+        metrics_path: '/actuator/prometheus'
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names:
+                - banking
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_app]
+            action: keep
+            regex: discovery-service
+          - source_labels: [__meta_kubernetes_pod_ip]
+            action: replace
+            target_label: __address__
+            replacement: ${1}:8080

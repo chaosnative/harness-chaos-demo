@@ -1,0 +1,66 @@
+# apiVersion: apps/v1
+# kind: Deployment
+# metadata:
+#   name: load-generator
+#   labels:
+#     app: load-generator
+# spec:
+#   replicas: 0  # Single instance generating continuous load
+#   selector:
+#     matchLabels:
+#       app: load-generator
+#   template:
+#     metadata:
+#       labels:
+#         app: load-generator
+#     spec:
+#       containers:
+#       - name: load-generator
+#         image: aady12/hpb-load-generator:0.0.11
+#         imagePullPolicy: Always
+        
+#         # Run in continuous mode
+#         args:
+#           - "--continuous"
+#           - "--rate"
+#           - "50"             #  transactions per minute
+#           - "--gateway"
+#           - "http://gateway-service:8080"  
+        
+#         # Resource limits
+#         resources:
+#           requests:
+#             memory: "128Mi"
+#             cpu: "100m"
+#           limits:
+#             memory: "256Mi"
+#             cpu: "500m"
+        
+#         # Environment variables
+#         env:
+#         - name: PYTHONUNBUFFERED
+#           value: "1"  # For real-time log output
+        
+#         # Liveness probe (restart if stuck)
+#         livenessProbe:
+#           exec:
+#             command:
+#             - python3
+#             - -c
+#             - "print('alive')"
+#           initialDelaySeconds: 30
+#           periodSeconds: 60
+#           timeoutSeconds: 5
+#           failureThreshold: 3
+        
+#         # Readiness probe (check if ready)
+#         readinessProbe:
+#           exec:
+#             command:
+#             - python3
+#             - -c
+#             - "print('ready')"
+#           initialDelaySeconds: 10
+#           periodSeconds: 30
+#           timeoutSeconds: 5
+# ---

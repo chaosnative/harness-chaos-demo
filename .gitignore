@@ -1,0 +1,22 @@
+# macOS
+.DS_Store
+**/.DS_Store
+
+# JetBrains
+.idea/
+
+# Terraform local plugins, state, and apply locks
+.terraform/
+**/.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraform.*
+**/.terraform.tfstate.lock.info
+tfplan
+*.tfplan

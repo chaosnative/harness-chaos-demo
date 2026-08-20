@@ -1,0 +1,164 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: notification-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: notification-service
+  template:
+    metadata:
+      labels:
+        app: notification-service
+    spec:
+      initContainers:
+      - name: init-db
+        image: postgres:16
+        command:
+        - sh
+        - -c
+        - |
+          until pg_isready -h postgresql -U $PGUSER; do
+            echo "Waiting for PostgreSQL to be ready..."
+            sleep 2
+          done
+          echo "PostgreSQL is ready. Checking if notification database exists..."
+          if ! psql -lqt | cut -d \| -f 1 | grep -qw notification; then
+            echo "Creating notification database..."
+            psql -c "CREATE DATABASE notification;"
+            echo "Notification database created successfully."
+          else
+            echo "Notification database already exists."
+          fi
+        env:
+        - name: PGHOST
+          value: "postgresql"
+        - name: PGPORT
+          value: "5432"
+        - name: PGUSER
+          valueFrom:
+            secretKeyRef:
+              name: banking-secrets
+              key: POSTGRES_USER
+        - name: PGPASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: banking-secrets
+              key: POSTGRES_PASSWORD
+      containers:
+      - name: notification-service
+        image: aady12/hpb-notification-service:0.0.9
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 10050
+          name: http
+        env:
+        - name: SPRING_PROFILES_ACTIVE
+          value: "prod,native"
+        - name: SPRING_CONFIG_IMPORT
+          value: "optional:configserver:http://config-server:8888"
+        - name: EUREKA_CLIENT_SERVICEURL_DEFAULTZONE
+          valueFrom:
+            configMapKeyRef:
+              name: banking-config
+              key: EUREKA_SERVER_URL
+        - name: SPRING_DATASOURCE_URL
+          value: "jdbc:postgresql://postgresql:5432/notification"
+        - name: SPRING_DATASOURCE_USERNAME
+          valueFrom:
+            secretKeyRef:
+              name: banking-secrets
+              key: POSTGRES_USER
+        - name: SPRING_DATASOURCE_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: banking-secrets
+              key: POSTGRES_PASSWORD
+        - name: SPRING_DATA_MONGODB_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: banking-config
+              key: MONGODB_HOST
+        - name: SPRING_DATA_MONGODB_PORT
+          valueFrom:
+            configMapKeyRef:
+              name: banking-config
+              key: MONGODB_PORT
+        - name: SPRING_DATA_MONGODB_USERNAME
+          valueFrom:
+            secretKeyRef:
+              name: banking-secrets
+              key: MONGO_INITDB_ROOT_USERNAME
+        - name: SPRING_DATA_MONGODB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: banking-secrets
+              key: MONGO_INITDB_ROOT_PASSWORD
+        - name: SPRING_DATA_MONGODB_DATABASE
+          value: "notification"
+        - name: SPRING_DATA_MONGODB_AUTHENTICATION_DATABASE
+          value: "admin"
+        - name: SPRING_JPA_HIBERNATE_DDL_AUTO
+          value: "update"
+        - name: SPRING_KAFKA_BOOTSTRAP_SERVERS
+          valueFrom:
+            configMapKeyRef:
+              name: banking-config
+              key: KAFKA_BOOTSTRAP_SERVERS
+        - name: SPRING_MAIL_PORT
+          value: "587"
+        - name: SPRING_MAIL_HOST
+          valueFrom:
+            secretKeyRef:
+              name: sendgrid-secret
+              key: SENDGRID_HOST
+              optional: true
+        - name: SPRING_MAIL_USERNAME
+          valueFrom:
+            secretKeyRef:
+              name: sendgrid-secret
+              key: SENDGRID_USERNAME
+              optional: true
+        - name: SPRING_MAIL_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: sendgrid-secret
+              key: SENDGRID_API_KEY
+              optional: true
+        - name: SPRING_MAIL_FROM
+          valueFrom:
+            secretKeyRef:
+              name: sendgrid-secret
+              key: SENDGRID_VERIFIED_EMAIL
+              optional: true
+        - name: MANAGEMENT_ZIPKIN_TRACING_ENDPOINT
+          value: "http://zipkin:9411/api/v2/spans"
+        - name: MANAGEMENT_ENDPOINTS_WEB_EXPOSURE_INCLUDE
+          value: "health,info,metrics,prometheus"
+        # livenessProbe:
+        #   httpGet:
+        #     path: /actuator/health
+        #     port: 10050
+        #   initialDelaySeconds: 300
+        #   periodSeconds: 10
+        # readinessProbe:
+        #   httpGet:
+        #     path: /actuator/health
+        #     port: 10050
+        #   initialDelaySeconds: 300
+        #   periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: notification-service
+spec:
+  selector:
+    app: notification-service
+  ports:
+  - port: 10050
+    targetPort: 10050
+    protocol: TCP
+  type: ClusterIP

@@ -1,0 +1,97 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: validator-service
+  labels:
+    app: validator-service
+    tier: validation
+    version: v1
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: validator-service
+  template:
+    metadata:
+      labels:
+        app: validator-service
+        tier: validation
+        version: v1
+    spec:
+      containers:
+      - name: validator
+        image: docker.io/aady12/hpb-validator-service:0.0.5
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8086
+          name: http
+          protocol: TCP
+        env:
+        - name: SPRING_PROFILES_ACTIVE
+          value: "prod,native"
+        - name: SPRING_KAFKA_BOOTSTRAP_SERVERS
+          value: "kafka-service:9092"
+        - name: SPRING_KAFKA_CONSUMER_GROUP_ID
+          value: "validator-group"
+        - name: SPRING_KAFKA_PRODUCER_ACKS
+          value: "all"
+        - name: SPRING_KAFKA_PRODUCER_RETRIES
+          value: "10"
+        - name: SPRING_KAFKA_PRODUCER_PROPERTIES_MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION
+          value: "5"
+        - name: SPRING_KAFKA_PRODUCER_PROPERTIES_ENABLE_IDEMPOTENCE
+          value: "true"
+        - name: SPRING_KAFKA_PRODUCER_PROPERTIES_REQUEST_TIMEOUT_MS
+          value: "30000"
+        - name: SPRING_KAFKA_PRODUCER_PROPERTIES_DELIVERY_TIMEOUT_MS
+          value: "120000"
+        - name: SERVER_PORT
+          value: "8086"
+        - name: EUREKA_CLIENT_ENABLED
+          value: "false"
+        - name: MANAGEMENT_ENDPOINTS_WEB_EXPOSURE_INCLUDE
+          value: "health,info,metrics,prometheus"
+        - name: MANAGEMENT_ZIPKIN_TRACING_ENDPOINT
+          value: "/actuator/zipkin"
+        - name: JAVA_OPTS
+          value: "-XX:+EnableDynamicAgentLoading"
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+        # livenessProbe:
+        #   httpGet:
+        #     path: /actuator/health/liveness
+        #     port: 8086
+        #   initialDelaySeconds: 60
+        #   periodSeconds: 10
+        #   timeoutSeconds: 3
+        #   failureThreshold: 3
+        # readinessProbe:
+        #   httpGet:
+        #     path: /actuator/health/readiness
+        #     port: 8086
+        #   initialDelaySeconds: 45
+        #   periodSeconds: 5
+        #   timeoutSeconds: 3
+        #   failureThreshold: 3
+      restartPolicy: Always
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: validator-service
+  labels:
+    app: validator-service
+spec:
+  type: ClusterIP
+  ports:
+  - port: 8086
+    targetPort: 8086
+    protocol: TCP
+    name: http
+  selector:
+    app: validator-service
