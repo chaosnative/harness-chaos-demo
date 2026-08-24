@@ -54,16 +54,22 @@ provider "aws" {
   }
 }
 
-# Token comes from the AWS provider (Harness connector / env creds). Do not
-# exec the aws CLI — delegates do not ship it, and that is what failed apply.
-data "aws_eks_cluster_auth" "cluster" {
-  name = module.eks.cluster_name
-}
-
+# Fresh token at apply time via aws CLI (installed on the delegate).
+# data.aws_eks_cluster_auth is captured in the saved plan and expires (~15m),
+# which causes Unauthorized after approval + EKS create.
 provider "kubernetes" {
   host                   = module.eks.cluster_endpoint
   cluster_ca_certificate = base64decode(module.eks.cluster_certificate_authority_data)
-  token                  = data.aws_eks_cluster_auth.cluster.token
+
+  exec {
+    api_version = "client.authentication.k8s.io/v1beta1"
+    command     = "aws"
+    args = [
+      "eks", "get-token",
+      "--cluster-name", module.eks.cluster_name,
+      "--region", var.aws_region,
+    ]
+  }
 }
 
 locals {
@@ -90,7 +96,15 @@ locals {
     users = [{
       name = "hpb-eks"
       user = {
-        token = data.aws_eks_cluster_auth.cluster.token
+        exec = {
+          apiVersion = "client.authentication.k8s.io/v1beta1"
+          command    = "aws"
+          args = [
+            "eks", "get-token",
+            "--cluster-name", module.eks.cluster_name,
+            "--region", var.aws_region,
+          ]
+        }
       }
     }]
     contexts = [{
@@ -103,7 +117,7 @@ locals {
     "current-context" = "hpb-eks"
   })
 
-  # kubectl via a token kubeconfig so local-exec does not need `aws eks`.
+  # kubectl uses aws eks get-token (aws + kubectl must be on PATH).
   kubeconfig = join("\n", [
     "export PATH=\"/usr/local/bin:/usr/bin:/opt/harness-delegate/client-tools/kubectl/v1.19.2:/opt/harness-delegate/client-tools/kubectl/v1.13.2:$PATH\"",
     "export KUBECONFIG=/tmp/hpb-eks.kubeconfig",
