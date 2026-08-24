@@ -3,6 +3,10 @@
 # =============================================================================
 # Override any value in Harness with TF_VAR_<name>, for example:
 # TF_VAR_cluster_name, TF_VAR_namespace_prefix, TF_VAR_namespace_count.
+#
+# AWS credentials must allow VPC, EKS, IAM roles/policies, ELB, and EBS.
+# An ECR-only CI user (for example harness-aws-ecr-prod-ci-rw) will fail on
+# ec2:CreateVpc and iam:CreatePolicy.
 
 # --- Cluster ---
 
@@ -88,7 +92,7 @@ variable "node_instance_types" {
 variable "node_desired_size" {
   description = "Desired worker node count"
   type        = number
-  default     = 6
+  default     = 7
 }
 
 variable "node_min_size" {
