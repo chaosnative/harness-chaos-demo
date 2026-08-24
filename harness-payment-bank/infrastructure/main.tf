@@ -484,7 +484,7 @@ resource "null_resource" "unset_gp2_default" {
     interpreter = ["/bin/bash", "-c"]
     command     = <<-EOT
       set -euo pipefail
-      ${local.kubeconfig} >/dev/null
+      ${local.kubeconfig}
       kubectl annotate storageclass gp2 storageclass.kubernetes.io/is-default-class=false --overwrite || true
     EOT
   }
@@ -505,7 +505,7 @@ resource "null_resource" "wait_ebs_csi" {
     interpreter = ["/bin/bash", "-c"]
     command     = <<-EOT
       set -euo pipefail
-      ${local.kubeconfig} >/dev/null
+      ${local.kubeconfig}
 
       echo "Waiting for EKS addon aws-ebs-csi-driver to become ACTIVE"
       for i in $(seq 1 60); do
@@ -612,7 +612,6 @@ resource "null_resource" "hpb_apply" {
     namespace      = each.value
     aws_region     = var.aws_region
     cluster_name   = module.eks.cluster_name
-    manifests_path = local.manifests_abs
     manifests_hash = local.manifests_hash
   }
 
@@ -627,7 +626,7 @@ resource "null_resource" "hpb_apply" {
         exit 1
       fi
 
-      ${local.kubeconfig} >/dev/null
+      ${local.kubeconfig}
 
       # Secrets/config/PVCs first so StatefulSets always have a claim to bind.
       kubectl apply -f "$DIR/secrets.yaml" -n "$NS"
@@ -709,7 +708,7 @@ resource "null_resource" "app_bootstrap" {
       TX="${local.transaction_deployment}"
       TIMEOUT="${local.app_ready_timeout}"
 
-      ${local.kubeconfig} >/dev/null
+      ${local.kubeconfig}
 
       fail_ns() {
         echo "[$NS] $*"
@@ -889,7 +888,7 @@ resource "null_resource" "prometheus_namespace_config" {
       TMP=$(mktemp -d)
       trap 'rm -rf "$TMP"' EXIT
 
-      ${local.kubeconfig} >/dev/null
+      ${local.kubeconfig}
 
       kubectl create clusterrolebinding "${local.prometheus_cluster_role}-${each.value}" \
         --clusterrole="${local.prometheus_cluster_role}" \
@@ -948,7 +947,7 @@ resource "null_resource" "wait_for_lbs" {
     interpreter = ["/bin/bash", "-c"]
     command     = <<-EOT
       set -euo pipefail
-      ${local.kubeconfig} >/dev/null
+      ${local.kubeconfig}
       NS="${each.value}"
       for svc in ${local.frontend_deployment} ${local.gateway_service} ${local.prometheus_service}; do
         echo "Waiting for LoadBalancer on $svc in $NS"
@@ -1026,7 +1025,7 @@ resource "null_resource" "frontend_gateway_url" {
         echo "Gateway LoadBalancer not ready for ${self.triggers.namespace}"
         exit 1
       fi
-      ${local.kubeconfig} >/dev/null
+      ${local.kubeconfig}
       kubectl set env deployment/${self.triggers.deployment} -n "${self.triggers.namespace}" "${self.triggers.env_name}=${self.triggers.gateway_url}"
       kubectl rollout status deployment/${self.triggers.deployment} -n "${self.triggers.namespace}" --timeout=10m
     EOT
