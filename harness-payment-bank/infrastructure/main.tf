@@ -13,6 +13,14 @@
 terraform {
   required_version = ">= 1.5.0"
 
+  backend "s3" {
+    bucket         = "hpb-demo-tfstate-naren"
+    key            = "hpb-eks/terraform.tfstate"
+    region         = "us-east-1"
+    encrypt        = true
+    dynamodb_table = "hpb-demo-tf-lock"
+  }
+
   required_providers {
     aws = {
       source  = "hashicorp/aws"
@@ -46,20 +54,16 @@ provider "aws" {
   }
 }
 
-# Talks to the cluster after it exists (same AWS identity as above).
+# Token comes from the AWS provider (Harness connector / env creds). Do not
+# exec the aws CLI — delegates do not ship it, and that is what failed apply.
+data "aws_eks_cluster_auth" "cluster" {
+  name = module.eks.cluster_name
+}
+
 provider "kubernetes" {
   host                   = module.eks.cluster_endpoint
   cluster_ca_certificate = base64decode(module.eks.cluster_certificate_authority_data)
-
-  exec {
-    api_version = "client.authentication.k8s.io/v1beta1"
-    command     = "aws"
-    args = [
-      "eks", "get-token",
-      "--cluster-name", module.eks.cluster_name,
-      "--region", var.aws_region,
-    ]
-  }
+  token                  = data.aws_eks_cluster_auth.cluster.token
 }
 
 locals {
@@ -73,7 +77,40 @@ locals {
     ManagedBy = "terraform"
   }
 
-  kubeconfig = "aws eks update-kubeconfig --region ${var.aws_region} --name ${module.eks.cluster_name}"
+  kubeconfig_yaml = yamlencode({
+    apiVersion = "v1"
+    kind       = "Config"
+    clusters = [{
+      name = "hpb-eks"
+      cluster = {
+        server                     = module.eks.cluster_endpoint
+        "certificate-authority-data" = module.eks.cluster_certificate_authority_data
+      }
+    }]
+    users = [{
+      name = "hpb-eks"
+      user = {
+        token = data.aws_eks_cluster_auth.cluster.token
+      }
+    }]
+    contexts = [{
+      name = "hpb-eks"
+      context = {
+        cluster = "hpb-eks"
+        user    = "hpb-eks"
+      }
+    }]
+    "current-context" = "hpb-eks"
+  })
+
+  # kubectl via a token kubeconfig so local-exec does not need `aws eks`.
+  kubeconfig = join("\n", [
+    "export PATH=\"/usr/local/bin:/usr/bin:/opt/harness-delegate/client-tools/kubectl/v1.19.2:/opt/harness-delegate/client-tools/kubectl/v1.13.2:$PATH\"",
+    "export KUBECONFIG=/tmp/hpb-eks.kubeconfig",
+    "cat > \"$KUBECONFIG\" <<'KUBEEOF'",
+    local.kubeconfig_yaml,
+    "KUBEEOF",
+  ])
 
   manifests_abs = startswith(var.manifests_path, "/") ? var.manifests_path : abspath("${path.module}/${var.manifests_path}")
   manifest_files = sort(tolist(setunion(
@@ -873,8 +910,7 @@ resource "null_resource" "prometheus_namespace_config" {
     interpreter = ["/bin/bash", "-c"]
     command     = <<-EOT
       set -euo pipefail
-      aws eks update-kubeconfig --region "${self.triggers.aws_region}" --name "${self.triggers.cluster_name}" >/dev/null
-      kubectl delete clusterrolebinding "${self.triggers.cluster_role_binding}" --ignore-not-found=true
+      kubectl delete clusterrolebinding "${self.triggers.cluster_role_binding}" --ignore-not-found=true || true
     EOT
   }
 
