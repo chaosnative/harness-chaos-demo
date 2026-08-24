@@ -1268,5 +1268,6 @@ output "service_endpoints" {
 }
 
 output "kubeconfig_command" {
-  value = local.kubeconfig
+  value     = local.kubeconfig
+  sensitive = true
 }
