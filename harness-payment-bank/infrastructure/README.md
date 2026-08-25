@@ -329,6 +329,21 @@ kubectl get pods -n banking-1
 terraform output service_endpoints
 ```
 
+## Next: Harness workshop resources
+
+This root only creates AWS + the banking apps. Chaos onboarding is a **second** apply in `../harness-resources`: org `workshop`, one project per namespace, delegate on this cluster, org connectors, discovery agents, and chaos infra v2.
+
+Do that after `service_endpoints` work. Tutorial, default names, and how those objects wire together: [`../harness-resources/README.md`](../harness-resources/README.md).
+
+```bash
+export HARNESS_ACCOUNT_ID="..."
+export HARNESS_PLATFORM_API_KEY="..."
+export TF_VAR_account_id="$HARNESS_ACCOUNT_ID"
+cd ../harness-resources
+terraform init
+terraform apply
+```
+
 ## Notes
 
 - Manifests live under `../hpb-manifest/hpb-k8s` in this repo and are applied as-is.
