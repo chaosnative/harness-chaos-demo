@@ -253,7 +253,7 @@ variable "aws_connector_name" {
 }
 
 variable "create_prometheus_connectors" {
-  description = "Create one org Prometheus connector per namespace (in-cluster URL)."
+  description = "Create one project-level Prometheus connector per team (in-cluster URL for banking-N)."
   type        = bool
   default     = true
 }

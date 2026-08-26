@@ -37,7 +37,7 @@ terraform {
     }
     helm = {
       source  = "hashicorp/helm"
-      version = "~> 2.17"
+      version = "~> 3.0"
     }
     time = {
       source  = "hashicorp/time"
@@ -77,11 +77,11 @@ provider "kubernetes" {
 }
 
 provider "helm" {
-  kubernetes {
+  kubernetes = {
     host                   = data.aws_eks_cluster.this.endpoint
     cluster_ca_certificate = base64decode(data.aws_eks_cluster.this.certificate_authority[0].data)
 
-    exec {
+    exec = {
       api_version = "client.authentication.k8s.io/v1beta1"
       command     = "aws"
       args = [
@@ -340,38 +340,43 @@ resource "helm_release" "delegate" {
   timeout          = 600
   cleanup_on_fail  = true
 
-  set {
-    name  = "delegateName"
-    value = local.delegate_name
-  }
-  set {
-    name  = "accountId"
-    value = var.account_id
-  }
-  set {
-    name  = "managerEndpoint"
-    value = var.manager_endpoint
-  }
-  set {
-    name  = "replicas"
-    value = tostring(var.delegate_replicas)
-  }
-  set {
-    name  = "nextGen"
-    value = "true"
-  }
-  set {
-    name  = "k8sPermissionsType"
-    value = "CLUSTER_ADMIN"
-  }
-  set {
-    name  = "upgrader.enabled"
-    value = "true"
-  }
-  set_sensitive {
-    name  = "delegateToken"
-    value = local.delegate_token
-  }
+  set = [
+    {
+      name  = "delegateName"
+      value = local.delegate_name
+    },
+    {
+      name  = "accountId"
+      value = var.account_id
+    },
+    {
+      name  = "managerEndpoint"
+      value = var.manager_endpoint
+    },
+    {
+      name  = "replicas"
+      value = tostring(var.delegate_replicas)
+    },
+    {
+      name  = "nextGen"
+      value = "true"
+    },
+    {
+      name  = "k8sPermissionsType"
+      value = "CLUSTER_ADMIN"
+    },
+    {
+      name  = "upgrader.enabled"
+      value = "true"
+    },
+  ]
+
+  set_sensitive = [
+    {
+      name  = "delegateToken"
+      value = local.delegate_token
+    },
+  ]
 
   depends_on = [
     harness_platform_delegatetoken.this,
