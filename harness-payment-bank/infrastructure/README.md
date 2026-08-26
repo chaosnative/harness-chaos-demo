@@ -333,7 +333,7 @@ terraform output service_endpoints
 
 This root only creates AWS + the banking apps. Chaos onboarding is a **second** apply in `../harness-resources`: org `workshop`, one project per namespace, delegate on this cluster, org connectors, discovery agents, and chaos infra v2.
 
-Do that after `service_endpoints` work. Tutorial, default names, and how those objects wire together: [`../harness-resources/README.md`](../harness-resources/README.md).
+Do that after `service_endpoints` work. Add Harness as the **next stage** of the same pipeline. End-to-end map (pipeline, PAT account, `team-N` vs `banking-N`): [`../README.md`](../README.md). Terraform detail: [`../harness-resources/README.md`](../harness-resources/README.md).
 
 ```bash
 export HARNESS_ACCOUNT_ID="..."

@@ -6,10 +6,12 @@
 # What this root creates (one terraform apply):
 #   1. Organization
 #   2. Org Connector templates (K8s inherit-from-delegate, AWS inherit-from-delegate, Prometheus)
-#   3. One Harness project per HPB namespace (banking-1 … N from infrastructure state)
+#   3. One Harness project per namespace: banking-N → project team_N / team-N
 #   4. Org-scoped delegate token + Kubernetes delegate on the EKS cluster
-#   5. Org connectors (K8s, AWS, one Prometheus per namespace) using the template spec
+#   5. Org AWS connector (optional); per-project K8s + Prometheus connectors
 #   6. Per project: environment, Kubernetes infra def, discovery agent, chaos infra v2
+#
+# PAT (HARNESS_PLATFORM_API_KEY) must be issued in the same account as account_id.
 #
 # Prerequisites: infrastructure/ already applied; HARNESS_ACCOUNT_ID,
 # HARNESS_PLATFORM_API_KEY, TF_VAR_account_id, aws, helm, kubectl.
@@ -17,7 +19,7 @@
 # --- Harness account / API ---
 
 variable "account_id" {
-  description = "Harness account ID. Export TF_VAR_account_id=$HARNESS_ACCOUNT_ID."
+  description = "Harness account ID where org workshop is created. Must match the account that issued HARNESS_PLATFORM_API_KEY. Export TF_VAR_account_id."
   type        = string
 }
 
@@ -109,15 +111,15 @@ variable "namespace_count" {
 # --- Projects (one per namespace) ---
 
 variable "project_identifier_prefix" {
-  description = "If set, project identifier is <prefix>_<namespace_with_underscores>. Empty = namespace with underscores (banking_1)."
+  description = "Harness project identifier is <prefix>_<index>. Default team → team_1 for namespace banking-1."
   type        = string
-  default     = ""
+  default     = "team"
 }
 
 variable "project_name_prefix" {
-  description = "If set, project display name is <prefix>-<namespace>. Empty = namespace (banking-1)."
+  description = "Harness project display name is <prefix>-<index>. Default team → team-1 for namespace banking-1."
   type        = string
-  default     = ""
+  default     = "team"
 }
 
 variable "project_color" {
@@ -222,7 +224,7 @@ variable "delegate_register_wait" {
 # --- Org connectors ---
 
 variable "k8s_connector_id" {
-  description = "Empty = <resource_prefix>_eks. Referenced from projects as org.<id>."
+  description = "Same identifier in every project (not org-level). Empty = <resource_prefix>_eks. Infra refs this id in the project."
   type        = string
   default     = ""
 }
@@ -257,13 +259,13 @@ variable "create_prometheus_connectors" {
 }
 
 variable "prometheus_connector_id_prefix" {
-  description = "Identifier becomes <prefix>_<namespace_with_underscores>. Empty = <resource_prefix>_prometheus"
+  description = "Identifier becomes <prefix>_<project_id> (e.g. hpb_prometheus_team_1). Empty = <resource_prefix>_prometheus"
   type        = string
   default     = ""
 }
 
 variable "prometheus_connector_name_prefix" {
-  description = "Display name becomes <prefix>-<namespace>. Empty = <resource_prefix>-prometheus"
+  description = "Display name becomes <prefix>-<project_name> (e.g. hpb-prometheus-team-1). Empty = <resource_prefix>-prometheus"
   type        = string
   default     = ""
 }
@@ -312,13 +314,13 @@ variable "infra_name" {
 # --- Discovery / chaos ---
 
 variable "discovery_agent_name_prefix" {
-  description = "Name becomes <prefix>-<namespace>. Empty = <resource_prefix>-discovery"
+  description = "Name becomes <prefix>-<project name> (hpb-discovery-team-1). Empty = <resource_prefix>-discovery"
   type        = string
   default     = ""
 }
 
 variable "discovery_installation_type" {
-  description = "CONNECTOR installs via the org Kubernetes connector / delegate"
+  description = "CONNECTOR installs via the project's Kubernetes connector / delegate"
   type        = string
   default     = "CONNECTOR"
 }
@@ -330,7 +332,7 @@ variable "discovery_install_namespace" {
 }
 
 variable "chaos_infra_name_prefix" {
-  description = "Name becomes <prefix>-<namespace>. Empty = <resource_prefix>-chaos"
+  description = "Name becomes <prefix>-<project name> (hpb-chaos-team-1). Empty = <resource_prefix>-chaos"
   type        = string
   default     = ""
 }

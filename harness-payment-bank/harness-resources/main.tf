@@ -1,8 +1,8 @@
 # =============================================================================
-# main.tf — org → templates → projects → delegate → connectors → discovery
+# main.tf — org → templates → team projects → delegate → per-project connectors
 # =============================================================================
-# One apply creates all Harness workshop resources. Names come from variables.tf
-# (TF_VAR_*). Cluster/namespaces default to infrastructure remote state.
+# One apply. Kubernetes namespaces stay banking-1 … N. Harness projects are
+# team-1 … team-N. Cluster/namespaces default to infrastructure remote state.
 #
 # terraform init && terraform apply
 # terraform output
@@ -50,9 +50,11 @@ terraform {
   }
 }
 
-# HARNESS_ACCOUNT_ID and HARNESS_PLATFORM_API_KEY must be set in the environment.
+# PAT (HARNESS_PLATFORM_API_KEY) must be issued in this same account.
+# HARNESS_PLATFORM_API_KEY is read from the environment.
 provider "harness" {
-  endpoint = var.harness_gateway_endpoint
+  endpoint   = var.harness_gateway_endpoint
+  account_id = var.account_id
 }
 
 provider "aws" {
@@ -154,7 +156,6 @@ locals {
 
   k8s_connector_id       = var.k8s_connector_id != "" ? var.k8s_connector_id : "${local.prefix_id}_eks"
   k8s_connector_name     = var.k8s_connector_name != "" ? var.k8s_connector_name : local.k8s_connector_id
-  k8s_connector_ref      = "org.${local.k8s_connector_id}"
   aws_connector_id       = var.aws_connector_id != "" ? var.aws_connector_id : "${local.prefix_id}_aws"
   aws_connector_name     = var.aws_connector_name != "" ? var.aws_connector_name : local.aws_connector_id
   aws_connector_ref      = "org.${local.aws_connector_id}"
@@ -168,11 +169,22 @@ locals {
   discovery_name_prefix = var.discovery_agent_name_prefix != "" ? var.discovery_agent_name_prefix : "${var.resource_prefix}-discovery"
   chaos_name_prefix     = var.chaos_infra_name_prefix != "" ? var.chaos_infra_name_prefix : "${var.resource_prefix}-chaos"
 
+  team_prefix_id   = var.project_identifier_prefix != "" ? var.project_identifier_prefix : "team"
+  team_prefix_name = var.project_name_prefix != "" ? var.project_name_prefix : "team"
+
+  ns_index = {
+    for ns in local.namespaces : ns => (
+      can(regex("[0-9]+$", ns)) ? regex("[0-9]+$", ns) : replace(ns, "-", "_")
+    )
+  }
+
+  # Kubernetes namespace banking-1 stays banking-1. Harness project is team_1 / team-1.
   projects = {
     for ns in local.namespaces : ns => {
       namespace  = ns
-      identifier = coalesce(try(var.project_overrides[ns].identifier, null), var.project_identifier_prefix != "" ? "${var.project_identifier_prefix}_${replace(ns, "-", "_")}" : replace(ns, "-", "_"))
-      name       = coalesce(try(var.project_overrides[ns].name, null), var.project_name_prefix != "" ? "${var.project_name_prefix}-${ns}" : ns)
+      index      = local.ns_index[ns]
+      identifier = coalesce(try(var.project_overrides[ns].identifier, null), "${local.team_prefix_id}_${local.ns_index[ns]}")
+      name       = coalesce(try(var.project_overrides[ns].name, null), "${local.team_prefix_name}-${local.ns_index[ns]}")
     }
   }
 }
@@ -373,15 +385,18 @@ resource "time_sleep" "delegate_register" {
 }
 
 # -----------------------------------------------------------------------------
-# 5. Org connectors (spec matches the templates; native resources fill <+input>)
+# 5. Org AWS connector (optional). K8s + Prometheus are per project (PnC layout).
 # -----------------------------------------------------------------------------
 
 resource "harness_platform_connector_kubernetes" "eks" {
+  for_each = local.projects
+
   identifier  = local.k8s_connector_id
   name        = local.k8s_connector_name
   org_id      = harness_platform_organization.this.identifier
-  description = "Org Kubernetes connector. Spec matches template ${local.k8s_template_id}:${var.template_version}."
-  tags        = concat(local.tags, ["template:${local.k8s_template_id}"])
+  project_id  = harness_platform_project.this[each.key].identifier
+  description = "Project Kubernetes connector for namespace ${each.value.namespace}. Spec matches template ${local.k8s_template_id}:${var.template_version}."
+  tags        = concat(local.tags, ["template:${local.k8s_template_id}", "namespace:${each.value.namespace}"])
 
   inherit_from_delegate {
     delegate_selectors = [local.delegate_name]
@@ -417,14 +432,15 @@ resource "harness_platform_connector_aws" "eks" {
 }
 
 resource "harness_platform_connector_prometheus" "namespace" {
-  for_each = var.create_prometheus_connectors ? toset(local.namespaces) : toset([])
+  for_each = var.create_prometheus_connectors ? local.projects : {}
 
-  identifier         = "${local.prometheus_id_prefix}_${replace(each.value, "-", "_")}"
-  name               = "${local.prometheus_name_prefix}-${each.value}"
+  identifier         = "${local.prometheus_id_prefix}_${each.value.identifier}"
+  name               = "${local.prometheus_name_prefix}-${each.value.name}"
   org_id             = harness_platform_organization.this.identifier
-  description        = "Prometheus in namespace ${each.value}. Spec matches template ${local.prometheus_template_id}:${var.template_version}."
-  tags               = concat(local.tags, ["template:${local.prometheus_template_id}", "namespace:${each.value}"])
-  url                = "http://prometheus.${each.value}.svc.cluster.local:${var.prometheus_port}"
+  project_id         = harness_platform_project.this[each.key].identifier
+  description        = "Prometheus in namespace ${each.value.namespace} (project ${each.value.name}). Spec matches template ${local.prometheus_template_id}:${var.template_version}."
+  tags               = concat(local.tags, ["template:${local.prometheus_template_id}", "namespace:${each.value.namespace}"])
+  url                = "http://prometheus.${each.value.namespace}.svc.cluster.local:${var.prometheus_port}"
   delegate_selectors = [local.delegate_name]
 
   depends_on = [
@@ -435,7 +451,7 @@ resource "harness_platform_connector_prometheus" "namespace" {
 }
 
 # -----------------------------------------------------------------------------
-# 6. Per project: environment, infra, discovery agent, chaos infra v2
+# 6. Per project: k8s connector (above), env, infra, discovery, chaos v2
 # -----------------------------------------------------------------------------
 
 resource "harness_platform_environment" "this" {
@@ -478,7 +494,7 @@ infrastructureDefinition:
   deploymentType: Kubernetes
   type: KubernetesDirect
   spec:
-    connectorRef: ${local.k8s_connector_ref}
+    connectorRef: ${local.k8s_connector_id}
     namespace: ${each.value.namespace}
     releaseName: release-<+INFRA_KEY>
   allowSimultaneousDeployments: true
@@ -493,7 +509,7 @@ infrastructureDefinition:
 resource "harness_service_discovery_agent" "this" {
   for_each = local.projects
 
-  name                   = "${local.discovery_name_prefix}-${each.value.namespace}"
+  name                   = "${local.discovery_name_prefix}-${each.value.name}"
   org_identifier         = harness_platform_organization.this.identifier
   project_identifier     = harness_platform_project.this[each.key].identifier
   environment_identifier = harness_platform_environment.this[each.key].id
@@ -521,7 +537,7 @@ resource "harness_chaos_infrastructure_v2" "this" {
   project_id     = harness_platform_project.this[each.key].identifier
   environment_id = harness_platform_environment.this[each.key].id
   infra_id       = harness_platform_infrastructure.this[each.key].id
-  name           = "${local.chaos_name_prefix}-${each.value.namespace}"
+  name           = "${local.chaos_name_prefix}-${each.value.name}"
   description    = "DDCR chaos infrastructure for namespace ${each.value.namespace}"
 
   namespace          = each.value.namespace
@@ -561,7 +577,7 @@ resource "null_resource" "install_chaos" {
       set -euo pipefail
       CMD=${jsonencode(harness_chaos_infrastructure_v2.this[each.key].install_command)}
       if [ -z "$${CMD//[[:space:]]/}" ]; then
-        echo "No chaos install command for ${each.value.namespace}; DDCR will use ${local.k8s_connector_ref}"
+        echo "No chaos install command for ${each.value.namespace}; DDCR will use project connector ${local.k8s_connector_id}"
         exit 0
       fi
       aws eks update-kubeconfig --region ${var.aws_region} --name ${local.cluster_name} --kubeconfig /tmp/hpb-eks.kubeconfig
@@ -589,6 +605,7 @@ output "namespaces" {
 output "projects" {
   value = {
     for ns, project in harness_platform_project.this : ns => {
+      namespace  = ns
       identifier = project.identifier
       name       = project.name
     }
@@ -599,8 +616,11 @@ output "delegate_name" {
   value = local.delegate_name
 }
 
-output "k8s_connector_ref" {
-  value = local.k8s_connector_ref
+output "k8s_connector_refs" {
+  value = {
+    for ns, connector in harness_platform_connector_kubernetes.eks :
+    ns => connector.identifier
+  }
 }
 
 output "aws_connector_ref" {
@@ -610,7 +630,7 @@ output "aws_connector_ref" {
 output "prometheus_connector_refs" {
   value = {
     for ns, connector in harness_platform_connector_prometheus.namespace :
-    ns => "org.${connector.identifier}"
+    ns => connector.identifier
   }
 }
 

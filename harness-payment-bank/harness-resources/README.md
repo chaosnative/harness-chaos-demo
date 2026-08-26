@@ -1,87 +1,52 @@
 # Harness Payment Bank — workshop Harness resources
 
-This Terraform root is the **second** workshop apply. After EKS and the banking apps exist (`../infrastructure`), one `terraform apply` registers Harness so each namespace can run discovery and chaos.
+End-to-end map (pipeline + AWS + PAT + `team-N` vs `banking-N`): [`../README.md`](../README.md).
 
-It does **not** create VPC, EKS, or application pods. It talks to the Harness API and installs a delegate into the cluster that `infrastructure/` already created.
+This root is the **second** apply. After EKS exists, it creates org `workshop`, one Harness project **`team-N` per namespace `banking-N`**, a delegate on the cluster, per-project K8s/Prometheus connectors, discovery, and chaos infra.
+
+It does **not** create VPC, EKS, or application pods.
 
 ```text
-harness-chaos-demo/
-└── harness-payment-bank/
-    ├── infrastructure/      # first apply: EKS + banking-1 … N
-    └── harness-resources/   # this directory: Harness org → chaos
-        ├── main.tf
-        ├── variables.tf
-        └── README.md
+harness-payment-bank/
+├── README.md           # start here
+├── infrastructure/     # EKS + banking-N
+└── harness-resources/  # this directory
 ```
 
-State is separate from EKS:
+State key: `hpb-harness/terraform.tfstate`. Destroy here does **not** destroy the cluster.
 
-| Root | S3 key |
-| --- | --- |
-| `infrastructure/` | `hpb-eks/terraform.tfstate` |
-| `harness-resources/` | `hpb-harness/terraform.tfstate` |
+## What apply creates
 
-Same bucket (`hpb-demo-tfstate-naren`) and lock table (`hpb-demo-tf-lock`). Destroy here does **not** destroy the cluster.
+1. Organization `workshop`.
+2. Connector templates (org).
+3. Projects: namespace `banking-1` → project id `team_1`, name `team-1`.
+4. Delegate on `hpb-eks`.
+5. Optional org AWS connector. **Per project:** K8s connector `hpb_eks`, Prometheus, env, infra (namespace still `banking-N`), discovery, chaos v2.
 
-## What this apply is for
+Experiments: import from a template in the UI after apply.
 
-Harness needs a chain from account down to “inject faults in `banking-1`”:
-
-1. An **organization** (workshop container).
-2. **Projects** — one per Kubernetes namespace so each attendee has their own space.
-3. A **delegate** running **on** `hpb-eks` — the worker that talks to Kubernetes and AWS from inside the cluster.
-4. **Connectors** that tell Harness “use that delegate for this cluster / AWS / Prometheus.”
-5. Per project: an **environment**, a **Kubernetes infrastructure definition** (which namespace), a **discovery agent** (map services), and **chaos infra v2** (run experiments).
-
-Connector **templates** are created in the same apply as a reusable spec. Terraform still creates connector **instances** with native resources, because the Harness Terraform provider does not accept `templateRef` on Kubernetes / AWS / Prometheus connectors. The instances fill the template’s `<+input>` fields (delegate selector, region, Prometheus URL).
-
-Experiments are **not** created here. After discovery maps services, build experiments in the UI.
-
-## Prerequisites
-
-- `../infrastructure` already applied: cluster `hpb-eks` (or your override) and namespaces `banking-1` … `N`.
-- AWS credentials that can `eks get-token` for that cluster (`helm` / `kubectl` install the delegate).
-- `HARNESS_ACCOUNT_ID` and `HARNESS_PLATFORM_API_KEY` (Harness PAT / service account, not AWS keys).
-- `TF_VAR_account_id` set to the same account ID (Terraform variable; the provider also reads `HARNESS_ACCOUNT_ID`).
-- `terraform` `>= 1.5`, `aws`, `helm`, `kubectl`.
-
-Namespaces and cluster name are read from `hpb-eks/terraform.tfstate`. Override with `TF_VAR_namespaces` / `TF_VAR_cluster_name` if that state is missing.
+PAT must be from the **same account** as `TF_VAR_account_id` (see parent README).
 
 ## How apply creates resources (order)
 
-Terraform in `main.tf` is one graph. Dependencies force this order. Names below are the **defaults** (`resource_prefix=hpb`, four namespaces from infra state).
-
 ```text
-1. Read infrastructure remote state → cluster name + namespaces
+1. Read infrastructure remote state → cluster name + namespaces banking-N
 2. Organization
 3. Connector templates (org)
-4. Projects (one per namespace)
-5. Delegate token (Harness) + namespace + Helm release (EKS)
-6. Wait 60s so Harness marks the delegate CONNECTED
-7. Org connectors (K8s, AWS, Prometheus) — they select the delegate
-8. Per project, in order:
-     environment
-       → Kubernetes infrastructure definition (points at org K8s connector + namespace)
-         → discovery agent (installs via that connector)
-           → chaos infrastructure v2 (links the discovery agent)
-             → optional kubectl of Harness’s install_command
+4. Projects team-N (one per namespace)
+5. Delegate token + Helm on EKS; wait 60s
+6. Org AWS connector (optional)
+7. Per project:
+     K8s connector + Prometheus
+     → environment → infra (connector hpb_eks, namespace banking-N)
+       → discovery → chaos v2
 ```
 
-Providers:
-
-| Provider | Used for |
-| --- | --- |
-| `harness` | Org, templates, projects, token, connectors, env, infra, discovery, chaos |
-| `aws` | Look up EKS API endpoint (`data.aws_eks_cluster`) |
-| `kubernetes` / `helm` | Create `harness-delegate-ng` and install `harness-delegate-ng` chart |
-| `time` | Wait after Helm Ready |
-| `null` | Run chaos `install_command` if Harness returns one |
-
-Kubernetes and Helm authenticate with `aws eks get-token` at apply time (not a stored kubeconfig).
+Kubernetes / Helm use `aws eks get-token` at apply time.
 
 ## Default names (full catalog)
 
-Empty name variables fall back to `resource_prefix` (`hpb`). Hyphens in Kubernetes names become underscores in Harness identifiers.
+Empty name variables fall back to `resource_prefix` (`hpb`).
 
 ### Account / org (once)
 
@@ -92,82 +57,49 @@ Empty name variables fall back to `resource_prefix` (`hpb`). Hyphens in Kubernet
 | AWS connector template | `harness_platform_template.aws` | `hpb_aws_inherit_delegate` | same | org, `v1` |
 | Prometheus connector template | `harness_platform_template.prometheus` | `hpb_prometheus` | same | org, `v1` |
 | Delegate token | `harness_platform_delegatetoken.this` | name `hpb-workshop-delegate-token` | — | org |
-| Kubernetes connector | `harness_platform_connector_kubernetes.eks` | `hpb_eks` | `hpb_eks` | org. Ref from projects: `org.hpb_eks` |
 | AWS connector | `harness_platform_connector_aws.eks` | `hpb_aws` | `hpb_aws` | org. Ref: `org.hpb_aws` |
-
-`org_name` empty means display name = `org_id`.
 
 ### On the EKS cluster (once)
 
 | Resource | Terraform | Name |
 | --- | --- | --- |
 | Namespace | `kubernetes_namespace_v1.delegate` | `harness-delegate-ng` |
-| Helm release / delegate | `helm_release.delegate` | `hpb-workshop-delegate` (chart `harness-delegate-ng`) |
+| Helm release / delegate | `helm_release.delegate` | `hpb-workshop-delegate` |
 
-The delegate registers with Harness using the org token. Connectors and discovery/chaos tasks select it by name `hpb-workshop-delegate`.
+### Per namespace (example `banking-1` → Harness `team-1`)
 
-### Per Kubernetes namespace (defaults: `banking-1` … `banking-4`)
+Terraform `for_each` key is still the **namespace** (`"banking-1"`).
 
-Same pattern for each namespace. Example for `banking-1`:
+| Resource | Identifier / name | Lives in |
+| --- | --- | --- |
+| Project | id `team_1`, name `team-1` | org `workshop` |
+| K8s connector | `hpb_eks` | **project** `team_1` (not org) |
+| Prometheus | id `hpb_prometheus_team_1`, name `hpb-prometheus-team-1` | project `team_1`. URL `http://prometheus.banking-1.svc.cluster.local:9090` |
+| Environment | `hpb` | project `team_1` |
+| K8s infra | `hpb_k8s` | project `team_1`. `connectorRef: hpb_eks`, namespace `banking-1` |
+| Discovery | `hpb-discovery-team-1` | observes `banking-1` |
+| Chaos infra v2 | `hpb-chaos-team-1` | SA `harness-chaos` in `banking-1` |
 
-| Resource | Terraform | Identifier / name | Lives in |
-| --- | --- | --- | --- |
-| Project | `harness_platform_project.this["banking-1"]` | id `banking_1`, name `banking-1` | org `workshop` |
-| Prometheus connector | `harness_platform_connector_prometheus.namespace["banking-1"]` | id `hpb_prometheus_banking_1`, name `hpb-prometheus-banking-1` | org. Ref: `org.hpb_prometheus_banking_1`. URL `http://prometheus.banking-1.svc.cluster.local:9090` |
-| Environment | `harness_platform_environment.this["banking-1"]` | `hpb` / `hpb`, type `PreProduction` | project `banking_1` |
-| K8s infra definition | `harness_platform_infrastructure.this["banking-1"]` | `hpb_k8s` / `hpb_k8s` | project `banking_1`, env `hpb`. Points at `org.hpb_eks` and namespace `banking-1` |
-| Discovery agent | `harness_service_discovery_agent.this["banking-1"]` | `hpb-discovery-banking-1` | project `banking_1`. Observes `banking-1`. Install type `CONNECTOR` |
-| Chaos infra v2 | `harness_chaos_infrastructure_v2.this["banking-1"]` | `hpb-chaos-banking-1` | project `banking_1`. Type `KubernetesV2`, scope `NAMESPACE`, SA `harness-chaos` in `banking-1` |
-
-Repeat for `banking-2` → project `banking_2`, Prometheus `hpb_prometheus_banking_2`, discovery `hpb-discovery-banking-2`, chaos `hpb-chaos-banking-2`. Environment and infra **identifiers** stay `hpb` and `hpb_k8s` because they are unique **per project**, not globally.
-
-With four namespaces, apply creates **four** of each per-project object plus **four** Prometheus connectors.
+`banking-2` → project `team_2` / `team-2`. Env and infra ids stay `hpb` / `hpb_k8s` (unique per project).
 
 ## How the pieces talk to each other
 
 ```text
-Harness account
-└── org workshop
-    ├── templates (spec only; not referenced by templateRef in Terraform)
-    ├── delegate token ──► Helm on EKS ──► pod hpb-workshop-delegate
-    │                                            ▲
-    │                                            │ selector
-    ├── connector org.hpb_eks  ──────────────────┤  cluster API via delegate
-    ├── connector org.hpb_aws  ──────────────────┤  AWS API via delegate (node/IRSA later)
-    └── connector org.hpb_prometheus_banking_N ──┘  scrape in-cluster Prometheus
-        │
-        └── project banking_N  (one attendee / one K8s namespace)
-            ├── environment hpb
-            └── infra hpb_k8s
-                  spec.connectorRef = org.hpb_eks
-                  spec.namespace    = banking-N
-                        │
-                        ├── discovery hpb-discovery-banking-N
-                        │     installation_type = CONNECTOR
-                        │     uses env + infra → therefore the org K8s connector
-                        │     installs agent, maps services in banking-N
-                        │
-                        └── chaos hpb-chaos-banking-N
-                              same env + infra
-                              discovery_agent_id = that discovery agent
-                              DDCR / faults stay in namespace banking-N
+org workshop
+├── templates
+├── delegate hpb-workshop-delegate on EKS
+├── org.hpb_aws (optional)
+└── project team-N
+    ├── k8s connector hpb_eks ──► delegate ──► namespace banking-N
+    ├── prometheus ──► prometheus.banking-N
+    ├── env hpb → infra hpb_k8s (namespace banking-N)
+    ├── discovery hpb-discovery-team-N
+    └── chaos hpb-chaos-team-N
 ```
 
-In words:
-
-- **Delegate** is the only worker on the cluster. Nothing else can reach Kubernetes or in-cluster Prometheus until it is CONNECTED.
-- **Org Kubernetes connector** (`org.hpb_eks`) is inherit-from-delegate: Harness does not store a kubeconfig; it asks `hpb-workshop-delegate` to run kubectl-equivalent calls. All projects share this one connector.
-- **Infrastructure definition** is the binding “this project’s env `hpb` means namespace `banking-N` on that connector.” Discovery and chaos both require env + infra so they inherit that binding.
-- **Discovery** (`CONNECTOR`) installs its agent through that same path and watches only its namespace (plus it blacklists `kube-system`, `kube-public`, `harness-delegate-ng`).
-- **Chaos v2** (`KubernetesV2` / DDCR) is scoped to that namespace and is wired to **that project’s** discovery agent so experiment UI can pick discovered services.
-- **Prometheus connectors** are org-level, one URL per namespace. They are created for later SLO/probe work; chaos infra does not reference them in this apply.
-- **AWS connector** is org-level inherit-from-delegate. It is not required for discovery/chaos v2 in this graph; it is there for AWS faults or later pipeline steps that run on this delegate.
-
-Shared vs copied:
-
-| Shared across all projects | Copied once per namespace |
+| Shared (org) | One copy per team |
 | --- | --- |
-| Org, templates, delegate, `org.hpb_eks`, `org.hpb_aws` | Project, Prometheus connector, env `hpb`, infra `hpb_k8s`, discovery, chaos |
+| Org, templates, delegate, optional AWS connector | Project `team-N`, K8s connector, Prometheus, env, infra, discovery, chaos |
 
 ## Apply
 
@@ -192,9 +124,9 @@ When it finishes:
 terraform output
 ```
 
-You should see `org_id`, `projects`, `delegate_name`, `k8s_connector_ref`, discovery agent ids, and chaos infra status.
+You should see `org_id`, `projects` (namespace → `team_N`), `delegate_name`, `k8s_connector_refs`, discovery agent ids, and chaos infra status.
 
-In Harness UI: **Account → Organizations → workshop**. Open project `banking-1`. Environment `hpb` should list infra `hpb_k8s`. Discovery and chaos should show agents for that namespace.
+In Harness UI: **Account → Organizations → workshop**. Open project **`team-1`**. Environment `hpb` should list infra `hpb_k8s` for namespace `banking-1`.
 
 On the cluster:
 
@@ -231,11 +163,12 @@ Only export a variable when you want to override a default. Empty exports can bl
 | `cluster_name` | from infra state | EKS cluster for Helm |
 | `namespaces` | from infra state | One project per entry |
 | `delegate_name` | `hpb-workshop-delegate` | Helm release and connector selector |
-| `k8s_connector_id` | `hpb_eks` | Org connector; projects use `org.<id>` |
+| `k8s_connector_id` | `hpb_eks` | Same id **inside each project** |
 | `environment_id` | `hpb` | Same id in every project |
 | `infra_id` | `hpb_k8s` | Same id in every project |
+| `project_identifier_prefix` | `team` | Project ids `team_1` … from `banking-1` … |
 | `create_aws_connector` | `true` | Set `false` to skip `org.hpb_aws` |
-| `create_prometheus_connectors` | `true` | One org Prometheus connector per namespace |
+| `create_prometheus_connectors` | `true` | One **project** Prometheus connector per team |
 | `apply_chaos_install_command` | `true` | Run Harness `install_command` via kubectl if non-empty |
 
 Examples:
@@ -246,7 +179,7 @@ export TF_VAR_org_name="Chaos Workshop"
 export TF_VAR_resource_prefix=hpb
 export TF_VAR_delegate_name=hpb-workshop-delegate
 export TF_VAR_k8s_connector_id=hpb_eks
-export TF_VAR_project_identifier_prefix=ws   # projects become ws_banking_1
+export TF_VAR_project_identifier_prefix=team   # default; team_1 for banking-1
 export TF_VAR_discovery_agent_name_prefix=hpb-discovery
 export TF_VAR_chaos_infra_name_prefix=hpb-chaos
 ```
@@ -259,25 +192,188 @@ project_overrides = {
 }
 ```
 
-## Pipeline shape
+## If apply fails
 
-Keep plan/apply in this repo. Recommended stages:
+This is **not** like `infrastructure/`. A failed EKS apply leaves AWS objects that block the next create, so that root rolls back with destroy. A failed harness-resources apply usually leaves a **partial Terraform state** plus some objects already in Harness. **Re-run apply.** Do not destroy unless you want a clean workshop org.
 
-1. **Plan** — checkout, Harness + AWS auth, `terraform init`, `terraform plan -out=tfplan` in this directory
-2. **Approve**
-3. **Apply** — `terraform apply tfplan`
+```bash
+cd harness-payment-bank/harness-resources
+terraform state list          # what Terraform already owns
+terraform apply               # continues from state
+```
 
-Working directory:
+`terraform apply` is incremental. Resources already in state are left alone. Missing ones are created.
+
+### Do not auto-destroy on failure
+
+Destroying this root deletes org `workshop`, projects, connectors, and the delegate Helm release. It does **not** delete EKS. That is the right cleanup when you want to start the Harness side from zero — not the default reaction to a timeout.
+
+### Common errors
+
+| Error you see | What it means | What to do |
+| --- | --- | --- |
+| `Error acquiring the state lock` | Another apply/pipeline still running, or a crash left the DynamoDB lock | Wait, or `terraform force-unlock <LOCK_ID>` only if you are sure nothing else is applying |
+| Remote state `hpb-eks/terraform.tfstate` missing / no `namespaces` | Infrastructure apply never finished | Apply `../infrastructure` first, or set `TF_VAR_cluster_name` and `TF_VAR_namespaces` |
+| `Unauthorized` / `eks get-token` / Helm Kubernetes auth | AWS session on the runner expired (SSO token) | Refresh AWS creds (or secrets), re-run apply. Helm/delegate already in state are reused |
+| Delegate pods not Ready / connectors fail after 60s | Helm installed but Harness has not marked the delegate CONNECTED | `kubectl get pods -n harness-delegate-ng`. Fix image/token/`TF_VAR_manager_endpoint`. Then `export TF_VAR_delegate_register_wait=180s` and apply again |
+| `DUPLICATE_IDENTIFIER` / already exists | Object is in Harness but **not** in this Terraform state (apply died after the API create, or it was created in the UI) | Import it (below), or delete that object in Harness and apply again |
+| Template already exists in org `workshop` | Templates were created outside this state | `terraform import` each template, **or** `TF_VAR_create_connector_templates=false` and apply |
+| Helm `hpb-workshop-delegate` already exists in `harness-delegate-ng` | Previous install not in state | `helm uninstall hpb-workshop-delegate -n harness-delegate-ng` **or** import `helm_release.delegate`, then apply |
+| `401 Unauthorized` on `harness_platform_organization` | PAT is wrong, expired, or from a **different account** than `TF_VAR_account_id` | Token from My Profile in the **workshop** account; see [`../README.md`](../README.md) |
+| Discovery / chaos create 4xx | Delegate or **project** K8s connector `hpb_eks` not working yet | Confirm connector test in project `team-1`, then apply again |
+
+### Import (object exists, not in state)
+
+Import IDs are `org` / `org/project` / `org/project/id`. After import, `terraform apply` should show no recreate for that resource.
+
+```bash
+# org
+terraform import harness_platform_organization.this workshop
+
+# project (for_each key is the Kubernetes namespace; id is team_1)
+terraform import 'harness_platform_project.this["banking-1"]' workshop/team_1
+
+# project K8s connector (format: org/project/connector)
+terraform import 'harness_platform_connector_kubernetes.eks["banking-1"]' workshop/team_1/hpb_eks
+terraform import 'harness_platform_connector_aws.eks[0]' workshop/hpb_aws
+terraform import 'harness_platform_connector_prometheus.namespace["banking-1"]' workshop/team_1/hpb_prometheus_team_1
+
+# templates (or TF_VAR_create_connector_templates=false)
+terraform import 'harness_platform_template.k8s[0]' workshop/hpb_k8s_inherit_delegate/v1
+terraform import 'harness_platform_template.aws[0]' workshop/hpb_aws_inherit_delegate/v1
+terraform import 'harness_platform_template.prometheus[0]' workshop/hpb_prometheus/v1
+
+# delegate on the cluster
+terraform import helm_release.delegate harness-delegate-ng/hpb-workshop-delegate
+```
+
+If import ID format is rejected, check the resource page on the [Harness Terraform provider](https://registry.terraform.io/providers/harness/harness/latest/docs). Environment / infra / discovery / chaos import IDs include org, project, and the resource id — deleting the leftover in the UI and re-applying is often faster than hunting the ID.
+
+### Clean slate (workshop Harness side only)
+
+```bash
+cd harness-payment-bank/harness-resources
+terraform destroy -auto-approve   # does not destroy hpb-eks
+terraform apply
+```
+
+If destroy fails because Harness still has objects that were never in state, delete org `workshop` (or the leftover connector/project) in the UI, `terraform state list` until empty, then apply.
+
+On the cluster after a bad Helm install:
+
+```bash
+kubectl get all -n harness-delegate-ng
+helm uninstall hpb-workshop-delegate -n harness-delegate-ng
+```
+
+## Harness pipeline
+
+Put this in the **same pipeline** as EKS, as the **next stage** after infrastructure Apply succeeds. That is the workshop flow: create the cluster, then register Harness on it.
+
+Do **not** put harness-resources in the same *step* (or same working directory) as EKS apply. Two Terraform roots, two state files. A failure in the new stage must **not** run `infrastructure/apply.sh` or `terraform destroy` on EKS.
+
+```text
+Plan EKS → Approve (once) → Apply EKS (infrastructure/)
+                          → Apply Harness resources (harness-resources/)
+```
+
+Do **not** add a second Plan → Approve → Apply loop. EKS needs a plan and a human gate because it creates a cluster. Harness resources are the next step of that same approved run: one Shell step, `terraform init` then `terraform apply -auto-approve` in `harness-payment-bank/harness-resources`.
+
+If you want a plan in the logs, run `terraform plan` in the **same** stage immediately before apply. Do not wait for another approval in between (SSO tokens die; the plan file does not carry across stages unless you upload it).
+
+Same delegate as EKS (`hpb-demo-delegate`). It **cannot** use `hpb-workshop-delegate` on the first run — that pod is what this stage creates.
+
+Do **not** use native `TerraformPlan` / `TerraformApply` steps here. Those run Terraform in a plugin image that does not include `helm` and `kubectl`. This root needs `terraform`, `aws`, `helm`, and `kubectl` on the delegate (same as EKS).
+
+**If the new stage fails:** in the execution UI, **Retry from last failed stage** (harness-resources only). Do not re-run the whole pipeline from Plan/Apply EKS — especially if EKS Apply uses `apply.sh` destroy-on-failure.
+
+**SSO tokens:** EKS Apply can take 25–40 minutes. If `AWS_SESSION_TOKEN` expires before this stage starts, refresh secrets and retry **this stage only**. That is the one reason to keep a separate pipeline; if your keys last long enough, one pipeline is simpler.
+
+Stage failure strategy for harness-resources: **MarkAsFailure** only. Never `PipelineRollback`, never a failure Shell that destroys `infrastructure/`.
+
+### Secrets and variables
+
+Create or reuse these in that project (or account/org, then reference them):
+
+| Name | Kind | Used as |
+| --- | --- | --- |
+| `harness_platform_api_key` | Secret (PAT / service account) | `HARNESS_PLATFORM_API_KEY` |
+| `aws_access_key_id` | Secret | `AWS_ACCESS_KEY_ID` (until IRSA) |
+| `aws_secret_access_key` | Secret | `AWS_SECRET_ACCESS_KEY` |
+| `aws_session_token` | Secret (optional; SSO) | `AWS_SESSION_TOKEN` |
+| `harness_account_id` | Pipeline variable (string) | `HARNESS_ACCOUNT_ID` and `TF_VAR_account_id` |
+
+The API key is a **Harness** token so Terraform can create org/projects. It is not an AWS key.
+
+Git: same repo connector you already use to checkout `harness-chaos-demo`.
+
+### Stages to add (after EKS Apply)
+
+Working directory for this stage only:
 
 ```text
 harness-payment-bank/harness-resources
 ```
 
-The runner needs `terraform`, `aws`, `helm`, and `kubectl`. This apply currently uses AWS to talk to EKS for Helm; it does not create the cluster. After the workshop delegate is on EKS with workload identity, later **infrastructure** applies can run on this delegate without AWS access keys (see the IRSA notes in the workshop plan). `HARNESS_PLATFORM_API_KEY` is still required for the Harness provider.
+Optional extra Approval between EKS Apply and this stage. On failure: **MarkAsFailure**, then retry this stage.
+
+### Stage YAML to paste
+
+Add this stage after EKS Apply. Reuse the same Git clone if the workspace still has the repo; otherwise clone again. Replace secret names if yours differ.
+
+Add pipeline variables `harness_account_id` and (optional) `manager_endpoint` if they are not already on the EKS pipeline. Then append this stage:
+
+```yaml
+    - stage:
+        name: Apply Harness resources
+        identifier: apply_harness_resources
+        type: Custom
+        spec:
+          execution:
+            steps:
+              - step:
+                  type: ShellScript
+                  name: Terraform apply harness-resources
+                  identifier: tf_apply_harness_resources
+                  spec:
+                    shell: Bash
+                    onDelegate: true
+                    source:
+                      type: Inline
+                      spec:
+                        script: |
+                          set -euo pipefail
+                          cd harness-payment-bank/harness-resources
+                          export HARNESS_ACCOUNT_ID="<+pipeline.variables.harness_account_id>"
+                          export HARNESS_PLATFORM_API_KEY="<+secrets.getValue("harness_platform_api_key")>"
+                          export TF_VAR_account_id="$HARNESS_ACCOUNT_ID"
+                          export TF_VAR_manager_endpoint="<+pipeline.variables.manager_endpoint>"
+                          export AWS_ACCESS_KEY_ID="<+secrets.getValue("aws_access_key_id")>"
+                          export AWS_SECRET_ACCESS_KEY="<+secrets.getValue("aws_secret_access_key")>"
+                          export AWS_SESSION_TOKEN="<+secrets.getValue("aws_session_token")>"
+                          export AWS_DEFAULT_REGION=us-east-1
+                          terraform init -input=false
+                          terraform apply -input=false -auto-approve
+                    executionTarget: {}
+                  timeout: 30m
+        delegateSelectors:
+          - hpb-demo-delegate
+        failureStrategies:
+          - onFailure:
+              errors:
+                - AllErrors
+              action:
+                type: MarkAsFailure
+```
+
+If the EKS stages already cloned the repo into a different path, `cd` to that clone’s `harness-payment-bank/harness-resources`. Skip GitClone here if the workspace still has the checkout from an earlier stage.
+
+After the workshop delegate is CONNECTED, you can later move **infrastructure** plan/apply onto `hpb-workshop-delegate` and drop AWS keys (IRSA). This stage still needs a Harness API key.
 
 ## Notes
 
+
 - Keep `main.tf` and `variables.tf` as the only Terraform language files.
-- Discovery install type is `CONNECTOR`: agents are installed through `org.hpb_eks`, not a hand-run Helm chart in this root.
+- Discovery install type is `CONNECTOR`: agents are installed through the **project** Kubernetes connector `hpb_eks`, not a hand-run Helm chart in this root.
 - Chaos type `KubernetesV2` is DDCR. Scope `NAMESPACE` so `banking-1` cannot target `banking-2`.
 - Tags on created objects include `workshop:true`, `project:hpb`, `managedby:terraform`.
