@@ -62,11 +62,11 @@ Harness account  <── PAT belongs here
 └── org workshop
     ├── delegate          hpb-workshop-delegate   (pod on hpb-eks)
     ├── templates         connector recipes (k8s / aws / prometheus)
-    ├── aws connector     org-level, optional (not required for chaos)
+    ├── k8s connector     org.hpb_eks  (shared, inherit-from-delegate)
+    ├── aws connector     org.hpb_aws  (optional)
     └── project team-1    (attendee 1)     namespace banking-1
-        ├── k8s connector     hpb_eks          → delegate → cluster
         ├── environment       hpb
-        ├── infra             hpb_k8s          → namespace banking-1
+        ├── infra             hpb_k8s          → org.hpb_eks, namespace banking-1
         ├── prometheus        hpb-prometheus-team-1  → prometheus.banking-1
         ├── discovery         hpb-discovery-team-1
         ├── chaos infra v2    hpb-chaos-team-1
@@ -74,8 +74,8 @@ Harness account  <── PAT belongs here
     └── project team-2 … same pattern, namespace banking-2
 ```
 
-**Org (shared):** delegate, templates.  
-**Each project (isolated):** k8s connector, env, infra, prometheus, discovery, chaos, experiments.
+**Org (shared):** delegate, connector templates, K8s connector, optional AWS connector.  
+**Each project (isolated):** Prometheus (per-namespace URL), env, infra, discovery, chaos, experiments.
 
 ## Folders and state
 
@@ -146,7 +146,7 @@ Do not destroy `infrastructure/` just to rename teams.
 
 | Area | Change |
 | --- | --- |
-| `harness-resources` Terraform | Project `team_N`; K8s + Prometheus **in the project**; infra `connectorRef` is project `hpb_eks` (not `org.hpb_eks`) |
+| `harness-resources` Terraform | Project `team_N`; **org** K8s connector `org.hpb_eks`; Prometheus **in the project**; infra `connectorRef` is `org.hpb_eks` |
 | Pipeline | Unique provisioner id; PAT + account id of **workshop** account; Helm on delegate; stage 2 after EKS |
 | Docs / talk | Say **team-1** for Harness, **banking-1** for kubectl |
 | Experiments | Still UI: import from org/account chaos templates into each `team-N` |

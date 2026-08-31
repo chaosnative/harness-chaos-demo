@@ -3,12 +3,14 @@
 # =============================================================================
 # Override any value with TF_VAR_<name>. Leave unset to keep workshop defaults.
 #
+# Terraform language in this folder is only main.tf + this file.
+#
 # What this root creates (one terraform apply):
 #   1. Organization
 #   2. Org Connector templates (K8s inherit-from-delegate, AWS inherit-from-delegate, Prometheus)
 #   3. One Harness project per namespace: banking-N → project team_N / team-N
 #   4. Org-scoped delegate token + Kubernetes delegate on the EKS cluster
-#   5. Org AWS connector (optional); per-project K8s + Prometheus connectors
+#   5. Org K8s + AWS connectors (shared); per-project Prometheus (URL is namespace-specific)
 #   6. Per project: environment, Kubernetes infra def, discovery agent, chaos infra v2
 #
 # PAT (HARNESS_PLATFORM_API_KEY) must be issued in the same account as account_id.
@@ -224,7 +226,7 @@ variable "delegate_register_wait" {
 # --- Org connectors ---
 
 variable "k8s_connector_id" {
-  description = "Same identifier in every project (not org-level). Empty = <resource_prefix>_eks. Infra refs this id in the project."
+  description = "Org-level Kubernetes connector identifier. Empty = <resource_prefix>_eks. Infra refs org.<id>."
   type        = string
   default     = ""
 }
@@ -253,7 +255,7 @@ variable "aws_connector_name" {
 }
 
 variable "create_prometheus_connectors" {
-  description = "Create one project-level Prometheus connector per team (in-cluster URL for banking-N)."
+  description = "Create one project-level Prometheus connector per team. URLs are http://prometheus.<namespace>.svc:9090 so they cannot be a single org connector."
   type        = bool
   default     = true
 }
@@ -338,9 +340,9 @@ variable "chaos_infra_name_prefix" {
 }
 
 variable "chaos_infra_type" {
-  description = "KubernetesV2 is DDCR (recommended). Kubernetes is legacy V1."
+  description = "KUBERNETESV2 is DDCR (recommended). KUBERNETES is legacy V1. Provider values are uppercase."
   type        = string
-  default     = "KubernetesV2"
+  default     = "KUBERNETESV2"
 }
 
 variable "chaos_infra_scope" {
