@@ -28,7 +28,7 @@
 #   https://developer.harness.io/docs/resilience-testing/platform-features/terraform-onboarding
 
 terraform {
-  required_version = ">= 1.5.0"
+  required_version = ">= 1.8.0"
 
   backend "s3" {
     bucket         = "hpb-demo-tfstate-naren"
@@ -242,15 +242,15 @@ resource "helm_release" "delegate" {
 
   create_namespace = false
   # Ready is polled by null_resource.delegate_ready so Helm is not killed by wait timeout.
-  wait             = false
-  wait_for_jobs    = false
-  atomic           = false
-  timeout          = var.delegate_helm_timeout
-  cleanup_on_fail  = false
-  max_history      = 5
+  wait            = false
+  wait_for_jobs   = false
+  atomic          = false
+  timeout         = var.delegate_helm_timeout
+  cleanup_on_fail = false
+  max_history     = 5
   # Cluster already has this release from a prior apply that never wrote state.
-  upgrade_install  = true
-  take_ownership   = true
+  upgrade_install = true
+  take_ownership  = true
 
   set = [
     {
@@ -472,6 +472,15 @@ infrastructureDefinition:
   ]
 }
 
+# Agents can be created in Harness then fail install (cron interval 0). They are
+# not in Terraform state. Import those namespaces so retry updates instead of
+# creating duplicates. Already-in-state imports are a no-op on Terraform >= 1.8.
+import {
+  for_each = toset(var.import_discovery_namespaces)
+  to       = harness_service_discovery_agent.this[each.key]
+  id       = "${local.org_id}/${local.projects[each.key].identifier}/${local.environment_id}/${local.infra_id}"
+}
+
 resource "harness_service_discovery_agent" "this" {
   for_each = local.projects
 
@@ -491,7 +500,10 @@ resource "harness_service_discovery_agent" "this" {
     data {
       observed_namespaces      = [each.value.namespace]
       blacklisted_namespaces   = ["kube-system", "kube-public", var.delegate_namespace]
-      collection_window_in_min = 10
+      collection_window_in_min = 15
+      cron {
+        expression = var.discovery_cron_expression
+      }
     }
   }
 

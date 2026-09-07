@@ -318,6 +318,18 @@ variable "discovery_install_namespace" {
   default     = ""
 }
 
+variable "discovery_cron_expression" {
+  description = "Collector schedule. Empty/omitted cron makes install fail with gocron interval 0."
+  type        = string
+  default     = "*/10 * * * *"
+}
+
+variable "import_discovery_namespaces" {
+  description = "Namespaces whose discovery agents already exist in Harness but not in state (partial create). Empty = create only. Pipeline retry after cron install failure: banking-1 and banking-2."
+  type        = list(string)
+  default     = ["banking-1", "banking-2"]
+}
+
 variable "chaos_infra_name_prefix" {
   description = "Name becomes <prefix>-<project name> (hpb-chaos-team-1). Empty = <resource_prefix>-chaos"
   type        = string
