@@ -287,9 +287,14 @@ variable "environment_type" {
 }
 
 variable "infra_id" {
-  description = "Empty = <resource_prefix>_k8s"
+  description = "CD + chaos Helm release stem. Must be DNS-1123 (lowercase, hyphens, no underscores). Empty = <resource_prefix>-k8s. Underscores become event-watcher-<id> and Helm 500s."
   type        = string
   default     = ""
+
+  validation {
+    condition     = var.infra_id == "" || can(regex("^[a-z0-9]([-a-z0-9]*[a-z0-9])?$", var.infra_id))
+    error_message = "infra_id must match Helm release names: lowercase alphanumeric and hyphens, no underscores."
+  }
 }
 
 variable "infra_name" {
@@ -327,7 +332,7 @@ variable "discovery_cron_expression" {
 variable "import_discovery_namespaces" {
   description = "Namespaces whose discovery agents already exist in Harness but not in state (partial create). Empty = create only. Pipeline retry after cron install failure: banking-1 and banking-2."
   type        = list(string)
-  default     = ["banking-1", "banking-2"]
+  default     = []
 }
 
 variable "chaos_infra_name_prefix" {
