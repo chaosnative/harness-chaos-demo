@@ -20,6 +20,8 @@
 # Failure / retry: do not terraform destroy this root on error. Re-run apply.
 # Resources already in state are left alone; missing ones are created.
 # Helm is non-atomic so a timed-out delegate is upgraded in place on retry.
+# upgrade_install adopts a cluster release that is not in Terraform state
+# (previous apply installed Helm, then failed before state was saved).
 #
 # Docs:
 #   https://registry.terraform.io/providers/harness/harness/latest/docs
@@ -240,12 +242,15 @@ resource "helm_release" "delegate" {
 
   create_namespace = false
   # Ready is polled by null_resource.delegate_ready so Helm is not killed by wait timeout.
-  wait            = false
-  wait_for_jobs   = false
-  atomic          = false
-  timeout         = var.delegate_helm_timeout
-  cleanup_on_fail = false
-  max_history     = 5
+  wait             = false
+  wait_for_jobs    = false
+  atomic           = false
+  timeout          = var.delegate_helm_timeout
+  cleanup_on_fail  = false
+  max_history      = 5
+  # Cluster already has this release from a prior apply that never wrote state.
+  upgrade_install  = true
+  take_ownership   = true
 
   set = [
     {
