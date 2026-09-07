@@ -279,7 +279,7 @@ resource "helm_release" "delegate" {
     },
     {
       name  = "upgrader.enabled"
-      value = "true"
+      value = "false"
     },
     {
       name  = "tags"
@@ -313,9 +313,14 @@ resource "null_resource" "delegate_ready" {
       set -euo pipefail
       NS=${jsonencode(var.delegate_namespace)}
       NAME=${jsonencode(local.delegate_name)}
+      CLUSTER=${jsonencode(local.cluster_name)}
+      REGION=${jsonencode(var.aws_region)}
       RETRIES=${var.apply_retries}
       DELAY=${var.apply_retry_interval}
-      echo "Waiting for delegate $NAME in namespace $NS (up to $RETRIES attempts, $${DELAY}s apart)"
+      KUBECONFIG_FILE="/tmp/hpb-delegate.kubeconfig"
+      aws eks update-kubeconfig --region "$REGION" --name "$CLUSTER" --kubeconfig "$KUBECONFIG_FILE"
+      export KUBECONFIG="$KUBECONFIG_FILE"
+      echo "Waiting for delegate $NAME in $NS on cluster $CLUSTER (up to $RETRIES attempts, $${DELAY}s apart)"
       i=1
       while [ "$i" -le "$RETRIES" ]; do
         echo "delegate ready attempt $i/$RETRIES"
@@ -324,14 +329,14 @@ resource "null_resource" "delegate_ready" {
             echo "Delegate pods Ready"
             exit 0
           fi
-          if kubectl get pods -n "$NS" --no-headers 2>/dev/null | grep -E "$NAME" | grep -qiE 'Running|1/1'; then
+          if kubectl get pods -n "$NS" -l app.kubernetes.io/instance="$NAME" --no-headers 2>/dev/null | grep -qiE 'Running|1/1'; then
             echo "Delegate pods Running"
             exit 0
           fi
         fi
         if [ "$i" -eq "$RETRIES" ]; then
-          echo "Delegate not Ready after $RETRIES attempts; re-run terraform apply (do not destroy)"
-          kubectl get pods -n "$NS" || true
+          echo "Delegate not Ready after $RETRIES attempts on $CLUSTER; re-run terraform apply (do not destroy)"
+          kubectl get pods -n "$NS" -l app.kubernetes.io/instance="$NAME" || true
           exit 1
         fi
         sleep "$DELAY"
