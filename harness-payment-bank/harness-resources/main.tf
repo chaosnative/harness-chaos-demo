@@ -479,6 +479,12 @@ infrastructureDefinition:
   ]
 }
 
+resource "terraform_data" "discovery_infra" {
+  for_each = local.projects
+
+  input = harness_platform_infrastructure.this[each.key].identifier
+}
+
 # Agents can be created in Harness then fail install (cron interval 0). They are
 # not in Terraform state. Import those namespaces so retry updates instead of
 # creating duplicates. Already-in-state imports are a no-op on Terraform >= 1.8.
@@ -512,6 +518,15 @@ resource "harness_service_discovery_agent" "this" {
         expression = var.discovery_cron_expression
       }
     }
+  }
+
+  # infra_identifier is immutable in the API. Changing CD infra id (hpb_k8s →
+  # hpbk8s) must replace the agent, not update it. terraform_data is new this
+  # apply so replace always runs once, even if the infra resource already moved.
+  lifecycle {
+    replace_triggered_by = [
+      terraform_data.discovery_infra[each.key],
+    ]
   }
 
   depends_on = [
