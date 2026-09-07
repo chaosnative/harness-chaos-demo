@@ -75,6 +75,12 @@ variable "org_description" {
   default = "Chaos engineering workshop organization for Harness Payment Bank"
 }
 
+variable "create_organization" {
+  description = "true = create org workshop. false = org already exists (retry after a failed apply); Terraform only looks it up. Set TF_VAR_create_organization=false in the pipeline after workshop exists."
+  type        = bool
+  default     = true
+}
+
 # --- Target cluster / namespaces ---
 
 variable "aws_region" {

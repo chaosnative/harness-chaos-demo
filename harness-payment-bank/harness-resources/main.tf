@@ -159,6 +159,8 @@ locals {
   team_prefix_id   = var.project_identifier_prefix != "" ? var.project_identifier_prefix : "team"
   team_prefix_name = var.project_name_prefix != "" ? var.project_name_prefix : "team"
 
+  org_identifier = var.create_organization ? harness_platform_organization.this[0].identifier : data.harness_platform_organization.this[0].identifier
+
   ns_index = {
     for ns in local.namespaces : ns => (
       can(regex("[0-9]+$", ns)) ? regex("[0-9]+$", ns) : replace(ns, "-", "_")
@@ -180,10 +182,18 @@ locals {
 # -----------------------------------------------------------------------------
 
 resource "harness_platform_organization" "this" {
+  count = var.create_organization ? 1 : 0
+
   identifier  = local.org_id
   name        = local.org_name
   description = var.org_description
   tags        = local.tags
+}
+
+data "harness_platform_organization" "this" {
+  count = var.create_organization ? 0 : 1
+
+  identifier = local.org_id
 }
 
 # -----------------------------------------------------------------------------
@@ -195,7 +205,7 @@ resource "harness_platform_project" "this" {
 
   identifier  = each.value.identifier
   name        = each.value.name
-  org_id      = harness_platform_organization.this.identifier
+  org_id      = local.org_identifier
   description = "HPB chaos workshop project targeting Kubernetes namespace ${each.value.namespace}"
   color       = var.project_color
   tags        = concat(local.tags, ["namespace:${each.value.namespace}"])
@@ -208,7 +218,7 @@ resource "harness_platform_project" "this" {
 resource "harness_platform_delegatetoken" "this" {
   name       = local.delegate_token_name
   account_id = var.account_id
-  org_id     = harness_platform_organization.this.identifier
+  org_id     = local.org_identifier
 }
 
 resource "kubernetes_namespace_v1" "delegate" {
@@ -343,7 +353,7 @@ resource "harness_platform_connector_kubernetes" "eks" {
 
   identifier   = local.k8s_connector_id
   name         = local.k8s_connector_name
-  org_id       = harness_platform_organization.this.identifier
+  org_id       = local.org_identifier
   project_id   = harness_platform_project.this[each.key].identifier
   description  = "Project Kubernetes connector for namespace ${each.value.namespace} (InheritFromDelegate)."
   tags         = concat(local.tags, ["namespace:${each.value.namespace}"])
@@ -364,7 +374,7 @@ resource "harness_platform_connector_aws" "eks" {
 
   identifier          = local.aws_connector_id
   name                = local.aws_connector_name
-  org_id              = harness_platform_organization.this.identifier
+  org_id              = local.org_identifier
   description         = "Org AWS connector (InheritFromDelegate)."
   tags                = local.tags
   execute_on_delegate = true
@@ -383,7 +393,7 @@ resource "harness_platform_connector_prometheus" "namespace" {
 
   identifier         = "${local.prometheus_id_prefix}_${each.value.identifier}"
   name               = "${local.prometheus_name_prefix}-${each.value.name}"
-  org_id             = harness_platform_organization.this.identifier
+  org_id             = local.org_identifier
   project_id         = harness_platform_project.this[each.key].identifier
   description        = "Prometheus in namespace ${each.value.namespace}."
   tags               = concat(local.tags, ["namespace:${each.value.namespace}"])
@@ -405,7 +415,7 @@ resource "harness_platform_environment" "this" {
 
   identifier   = local.environment_id
   name         = local.environment_name
-  org_id       = harness_platform_organization.this.identifier
+  org_id       = local.org_identifier
   project_id   = harness_platform_project.this[each.key].identifier
   type         = var.environment_type
   description  = "HPB workshop environment for namespace ${each.value.namespace}"
@@ -418,7 +428,7 @@ resource "harness_platform_infrastructure" "this" {
 
   identifier      = local.infra_id
   name            = local.infra_name
-  org_id          = harness_platform_organization.this.identifier
+  org_id          = local.org_identifier
   project_id      = harness_platform_project.this[each.key].identifier
   env_id          = harness_platform_environment.this[each.key].identifier
   type            = "KubernetesDirect"
@@ -430,7 +440,7 @@ resource "harness_platform_infrastructure" "this" {
 infrastructureDefinition:
   name: ${local.infra_name}
   identifier: ${local.infra_id}
-  orgIdentifier: ${harness_platform_organization.this.identifier}
+  orgIdentifier: ${local.org_identifier}
   projectIdentifier: ${each.value.identifier}
   environmentRef: ${local.environment_id}
   description: HPB workshop Kubernetes infrastructure for ${each.value.namespace}
@@ -456,7 +466,7 @@ resource "harness_service_discovery_agent" "this" {
   for_each = local.projects
 
   name                   = "${local.discovery_name_prefix}-${each.value.name}"
-  org_identifier         = harness_platform_organization.this.identifier
+  org_identifier         = local.org_identifier
   project_identifier     = harness_platform_project.this[each.key].identifier
   environment_identifier = harness_platform_environment.this[each.key].identifier
   infra_identifier       = harness_platform_infrastructure.this[each.key].identifier
@@ -484,7 +494,7 @@ resource "harness_service_discovery_agent" "this" {
 resource "harness_chaos_infrastructure_v2" "this" {
   for_each = local.projects
 
-  org_id         = harness_platform_organization.this.identifier
+  org_id         = local.org_identifier
   project_id     = harness_platform_project.this[each.key].identifier
   environment_id = harness_platform_environment.this[each.key].identifier
   infra_id       = harness_platform_infrastructure.this[each.key].identifier
@@ -562,7 +572,7 @@ resource "null_resource" "install_chaos" {
 # -----------------------------------------------------------------------------
 
 output "org_id" {
-  value = harness_platform_organization.this.identifier
+  value = local.org_identifier
 }
 
 output "namespaces" {
@@ -593,7 +603,7 @@ output "k8s_connector_refs" {
 resource "harness_chaos_experiment" "from_template" {
   for_each = var.experiment_template_identity != "" && var.experiment_hub_identity != "" ? local.projects : {}
 
-  org_id     = harness_platform_organization.this.identifier
+  org_id     = local.org_identifier
   project_id = harness_platform_project.this[each.key].identifier
 
   hub_identity      = var.experiment_hub_identity
