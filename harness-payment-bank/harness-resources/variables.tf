@@ -10,7 +10,6 @@
 #   2. Org Connector templates (K8s inherit-from-delegate, AWS inherit-from-delegate, Prometheus)
 #   3. One Harness project per namespace: banking-N → project team_N / team-N
 #   4. Org-scoped delegate token + Kubernetes delegate on the EKS cluster
-#   5. Org-scoped delegate token + Kubernetes delegate on the EKS cluster
 #   6. Per project: K8s connector, Prometheus, environment, infra, discovery, chaos v2
 #   7. Per project: import chaos experiment from a hub template (if identities are set)
 #
@@ -219,9 +218,37 @@ variable "decode_delegate_token" {
 }
 
 variable "delegate_register_wait" {
-  description = "Wait after helm Ready so Harness can mark the delegate CONNECTED before connectors are created."
+  description = "Fixed extra wait after pods are Ready (Harness still marking CONNECTED). Prefer the poller; this is a small buffer after success."
   type        = string
-  default     = "60s"
+  default     = "15s"
+}
+
+variable "delegate_helm_timeout" {
+  description = "Helm wait timeout in seconds for the workshop delegate release."
+  type        = number
+  default     = 600
+}
+
+variable "apply_retries" {
+  description = "Retries for delegate-ready poll and chaos install_command. Pipeline should also re-run terraform apply on stage failure (do not destroy)."
+  type        = number
+  default     = 8
+
+  validation {
+    condition     = var.apply_retries >= 1 && var.apply_retries <= 30
+    error_message = "apply_retries must be between 1 and 30."
+  }
+}
+
+variable "apply_retry_interval" {
+  description = "Seconds between retries."
+  type        = number
+  default     = 20
+
+  validation {
+    condition     = var.apply_retry_interval >= 5 && var.apply_retry_interval <= 120
+    error_message = "apply_retry_interval must be between 5 and 120."
+  }
 }
 
 # --- Per-project K8s connector; optional org AWS ---

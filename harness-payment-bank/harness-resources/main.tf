@@ -13,8 +13,9 @@
 #   7. Per project: K8s connector, Prometheus, environment, infra, discovery,
 #      chaos v2, experiment import from template (if template ids are set)
 #
-# terraform init && terraform apply
-# terraform output
+# Failure / retry: do not terraform destroy this root on error. Re-run apply.
+# Resources already in state are left alone; missing ones are created.
+# Helm is non-atomic so a timed-out delegate is upgraded in place on retry.
 #
 # Docs:
 #   https://registry.terraform.io/providers/harness/harness/latest/docs
@@ -350,9 +351,11 @@ resource "helm_release" "delegate" {
   create_namespace = false
   wait             = true
   wait_for_jobs    = false
-  atomic           = true
-  timeout          = 600
-  cleanup_on_fail  = true
+  # Non-atomic: a timeout must not roll back a running delegate. Retry apply upgrades in place.
+  atomic          = false
+  timeout         = var.delegate_helm_timeout
+  cleanup_on_fail = false
+  max_history     = 5
 
   set = [
     {
@@ -402,9 +405,52 @@ resource "helm_release" "delegate" {
   ]
 }
 
+resource "null_resource" "delegate_ready" {
+  triggers = {
+    release = helm_release.delegate.id
+    retries = tostring(var.apply_retries)
+    delay   = tostring(var.apply_retry_interval)
+  }
+
+  provisioner "local-exec" {
+    interpreter = ["/bin/bash", "-c"]
+    command     = <<-EOT
+      set -euo pipefail
+      NS=${jsonencode(var.delegate_namespace)}
+      NAME=${jsonencode(local.delegate_name)}
+      RETRIES=${var.apply_retries}
+      DELAY=${var.apply_retry_interval}
+      echo "Waiting for delegate $NAME in namespace $NS (up to $RETRIES attempts, $${DELAY}s apart)"
+      i=1
+      while [ "$i" -le "$RETRIES" ]; do
+        echo "delegate ready attempt $i/$RETRIES"
+        if kubectl get ns "$NS" >/dev/null 2>&1; then
+          if kubectl wait --for=condition=Ready pod -n "$NS" -l app.kubernetes.io/instance="$NAME" --timeout=45s 2>/dev/null; then
+            echo "Delegate pods Ready"
+            exit 0
+          fi
+          if kubectl get pods -n "$NS" --no-headers 2>/dev/null | grep -E "$NAME" | grep -qiE 'Running|1/1'; then
+            echo "Delegate pods Running"
+            exit 0
+          fi
+        fi
+        if [ "$i" -eq "$RETRIES" ]; then
+          echo "Delegate not Ready after $RETRIES attempts; re-run terraform apply (do not destroy)"
+          kubectl get pods -n "$NS" || true
+          exit 1
+        fi
+        sleep "$DELAY"
+        i=$((i + 1))
+      done
+    EOT
+  }
+
+  depends_on = [helm_release.delegate]
+}
+
 resource "time_sleep" "delegate_register" {
   create_duration = var.delegate_register_wait
-  depends_on      = [helm_release.delegate]
+  depends_on      = [null_resource.delegate_ready]
 }
 
 # -----------------------------------------------------------------------------
@@ -614,11 +660,25 @@ resource "null_resource" "install_chaos" {
         echo "No chaos install command for ${each.value.namespace}; DDCR will use project connector ${local.k8s_connector_id}"
         exit 0
       fi
+      RETRIES=${var.apply_retries}
+      DELAY=${var.apply_retry_interval}
       KUBECONFIG_FILE="/tmp/hpb-eks-${each.value.identifier}.kubeconfig"
-      aws eks update-kubeconfig --region ${var.aws_region} --name ${local.cluster_name} --kubeconfig "$KUBECONFIG_FILE"
-      export KUBECONFIG="$KUBECONFIG_FILE"
-      echo "Running chaos install command for ${each.value.namespace}"
-      bash -lc "$CMD"
+      i=1
+      while [ "$i" -le "$RETRIES" ]; do
+        echo "chaos install ${each.value.namespace} attempt $i/$RETRIES"
+        if aws eks update-kubeconfig --region ${var.aws_region} --name ${local.cluster_name} --kubeconfig "$KUBECONFIG_FILE" \
+          && export KUBECONFIG="$KUBECONFIG_FILE" \
+          && bash -lc "$CMD"; then
+          echo "Chaos install succeeded for ${each.value.namespace}"
+          exit 0
+        fi
+        if [ "$i" -eq "$RETRIES" ]; then
+          echo "Chaos install failed for ${each.value.namespace} after $RETRIES attempts; re-run terraform apply"
+          exit 1
+        fi
+        sleep "$DELAY"
+        i=$((i + 1))
+      done
     EOT
   }
 
