@@ -500,7 +500,7 @@ resource "harness_service_discovery_agent" "this" {
     data {
       observed_namespaces      = [each.value.namespace]
       blacklisted_namespaces   = ["kube-system", "kube-public", var.delegate_namespace]
-      collection_window_in_min = 15
+      collection_window_in_min = 10
       cron {
         expression = var.discovery_cron_expression
       }
