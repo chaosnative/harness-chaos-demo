@@ -19,6 +19,9 @@
 #
 # Failure / retry: do not terraform destroy this root on error. Re-run apply.
 # Resources already in state are left alone; missing ones are created.
+# Harness TerraformApply runs `terraform refresh` as its own command.
+# TF_CLI_ARGS_apply does not skip that. On TerraformApply_2 enable
+# "Skip Refresh Command" (skipRefreshCommand: true) until this apply succeeds.
 # Helm is non-atomic so a timed-out delegate is upgraded in place on retry.
 # upgrade_install adopts a cluster release that is not in Terraform state
 # (previous apply installed Helm, then failed before state was saved).
@@ -479,22 +482,16 @@ infrastructureDefinition:
   ]
 }
 
-resource "terraform_data" "discovery_infra" {
-  for_each = local.projects
-
-  input = harness_platform_infrastructure.this[each.key].identifier
+# Stale state: agents were deleted in Harness (or imported under the wrong id
+# hpb_k8s) so refresh returns 404. Drop them from state without a destroy API
+# call, then create a new resource address bound to hpbk8s.
+# Pipeline: enable Skip Refresh Command on TerraformApply_2 (not TF_CLI_ARGS_apply).
+removed {
+  from = harness_service_discovery_agent.this
+  lifecycle { destroy = false }
 }
 
-# Agents can be created in Harness then fail install (cron interval 0). They are
-# not in Terraform state. Import those namespaces so retry updates instead of
-# creating duplicates. Already-in-state imports are a no-op on Terraform >= 1.8.
-import {
-  for_each = toset(var.import_discovery_namespaces)
-  to       = harness_service_discovery_agent.this[each.key]
-  id       = "${local.org_id}/${local.projects[each.key].identifier}/${local.environment_id}/${local.infra_id}"
-}
-
-resource "harness_service_discovery_agent" "this" {
+resource "harness_service_discovery_agent" "workshop" {
   for_each = local.projects
 
   name                   = "${local.discovery_name_prefix}-${each.value.name}"
@@ -520,15 +517,6 @@ resource "harness_service_discovery_agent" "this" {
     }
   }
 
-  # infra_identifier is immutable in the API. Changing CD infra id (hpb_k8s →
-  # hpbk8s) must replace the agent, not update it. terraform_data is new this
-  # apply so replace always runs once, even if the infra resource already moved.
-  lifecycle {
-    replace_triggered_by = [
-      terraform_data.discovery_infra[each.key],
-    ]
-  }
-
   depends_on = [
     harness_platform_infrastructure.this,
     harness_platform_connector_kubernetes.eks,
@@ -550,7 +538,7 @@ resource "harness_chaos_infrastructure_v2" "this" {
   infra_type         = var.chaos_infra_type
   infra_scope        = var.chaos_infra_scope
   ai_enabled         = var.ai_enabled
-  discovery_agent_id = coalesce(harness_service_discovery_agent.this[each.key].identity, harness_service_discovery_agent.this[each.key].id)
+  discovery_agent_id = coalesce(harness_service_discovery_agent.workshop[each.key].identity, harness_service_discovery_agent.workshop[each.key].id)
   service_account    = var.chaos_service_account
 
   resources {
@@ -564,7 +552,7 @@ resource "harness_chaos_infrastructure_v2" "this" {
     }
   }
 
-  depends_on = [harness_service_discovery_agent.this]
+  depends_on = [harness_service_discovery_agent.workshop]
 }
 
 resource "null_resource" "install_chaos" {
@@ -695,7 +683,7 @@ output "prometheus_connector_refs" {
 
 output "discovery_agents" {
   value = {
-    for ns, agent in harness_service_discovery_agent.this : ns => {
+    for ns, agent in harness_service_discovery_agent.workshop : ns => {
       name     = agent.name
       id       = agent.id
       identity = agent.identity
