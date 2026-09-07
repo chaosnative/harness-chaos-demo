@@ -25,4 +25,5 @@ tfplan
 harness-payment-bank/harness-resources/*
 !harness-payment-bank/harness-resources/main.tf
 !harness-payment-bank/harness-resources/variables.tf
+harness-payment-bank/README.md
 
