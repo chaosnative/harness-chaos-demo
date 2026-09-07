@@ -22,8 +22,9 @@
 # Helm is non-atomic so a timed-out delegate is upgraded in place on retry.
 # upgrade_install adopts a cluster release that is not in Terraform state
 # (previous apply installed Helm, then failed before state was saved).
-# CD infra identifier must be Helm-safe (hyphens, no underscores). Chaos
-# event-watcher release name is event-watcher-<infra_id>.
+# CD infra identifier is used as Helm release stem event-watcher-<infra_id>.
+# Harness IDs forbid hyphens; Helm forbids underscores. Use lowercase
+# alphanumeric only (e.g. hpbk8s).
 #
 # Docs:
 #   https://registry.terraform.io/providers/harness/harness/latest/docs
@@ -155,8 +156,8 @@ locals {
 
   environment_id        = var.environment_id != "" ? var.environment_id : local.prefix_id
   environment_name      = var.environment_name != "" ? var.environment_name : local.environment_id
-  infra_id   = var.infra_id != "" ? var.infra_id : "${var.resource_prefix}-k8s"
-  infra_name = var.infra_name != "" ? var.infra_name : local.infra_id
+  infra_id              = var.infra_id != "" ? var.infra_id : "${replace(var.resource_prefix, "-", "")}k8s"
+  infra_name            = var.infra_name != "" ? var.infra_name : "${var.resource_prefix}-k8s"
   discovery_name_prefix = var.discovery_agent_name_prefix != "" ? var.discovery_agent_name_prefix : "${var.resource_prefix}-discovery"
   chaos_name_prefix     = var.chaos_infra_name_prefix != "" ? var.chaos_infra_name_prefix : "${var.resource_prefix}-chaos"
 

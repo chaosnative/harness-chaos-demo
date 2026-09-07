@@ -287,13 +287,13 @@ variable "environment_type" {
 }
 
 variable "infra_id" {
-  description = "CD + chaos Helm release stem. Must be DNS-1123 (lowercase, hyphens, no underscores). Empty = <resource_prefix>-k8s. Underscores become event-watcher-<id> and Helm 500s."
+  description = "CD infrastructure identifier and Chaos event-watcher Helm stem. Harness forbids hyphens; Helm forbids underscores. Empty = <resource_prefix without hyphens>k8s (hpbk8s)."
   type        = string
   default     = ""
 
   validation {
-    condition     = var.infra_id == "" || can(regex("^[a-z0-9]([-a-z0-9]*[a-z0-9])?$", var.infra_id))
-    error_message = "infra_id must match Helm release names: lowercase alphanumeric and hyphens, no underscores."
+    condition     = var.infra_id == "" || can(regex("^[a-z][a-z0-9]{0,127}$", var.infra_id))
+    error_message = "infra_id must be lowercase letters and digits only (no hyphen, no underscore) so it is valid for both Harness and Helm."
   }
 }
 
