@@ -196,6 +196,10 @@ resource "harness_platform_organization" "this" {
   name        = local.org_name
   description = var.org_description
   tags        = local.tags
+
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 data "harness_platform_organization" "this" {
@@ -569,9 +573,9 @@ resource "null_resource" "install_chaos" {
     interpreter = ["/bin/bash", "-c"]
     command     = <<-EOT
       set -euo pipefail
-      CMD=${jsonencode(harness_chaos_infrastructure_v2.this[each.key].install_command)}
-      if [ -z "$${CMD//[[:space:]]/}" ]; then
-        echo "No chaos install command for ${each.value.namespace}; DDCR will use project connector ${local.k8s_connector_id}"
+      CMD=${jsonencode(coalesce(harness_chaos_infrastructure_v2.this[each.key].install_command, ""))}
+      if [ -z "$${CMD}" ] || [ "$${CMD}" = "null" ]; then
+        echo "No chaos install command for ${each.value.namespace}; DDCR uses connector ${local.k8s_connector_id}"
         exit 0
       fi
       RETRIES=${var.apply_retries}

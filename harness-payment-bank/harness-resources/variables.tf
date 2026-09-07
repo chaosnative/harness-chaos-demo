@@ -76,7 +76,7 @@ variable "org_description" {
 }
 
 variable "create_organization" {
-  description = "true = create org workshop. false = org already exists (retry after a failed apply); Terraform only looks it up. Set TF_VAR_create_organization=false in the pipeline after workshop exists."
+  description = "true = Terraform manages org workshop (create or update). false = look up only. Do NOT set false once the org is already in Terraform state — that plans a destroy of workshop. Org is prevent_destroy."
   type        = bool
   default     = true
 }
@@ -368,9 +368,9 @@ variable "ai_enabled" {
 }
 
 variable "apply_chaos_install_command" {
-  description = "Run any install_command Harness returns after registering chaos infra v2."
+  description = "Run chaos infra install_command via kubectl. CONNECTOR/DDCR returns null; leave false. true only if Harness returns a real shell command."
   type        = bool
-  default     = true
+  default     = false
 }
 
 # --- Experiment import (one template into every team project) ---
