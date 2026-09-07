@@ -10,8 +10,9 @@
 #   2. Org Connector templates (K8s inherit-from-delegate, AWS inherit-from-delegate, Prometheus)
 #   3. One Harness project per namespace: banking-N → project team_N / team-N
 #   4. Org-scoped delegate token + Kubernetes delegate on the EKS cluster
-#   5. Org K8s + AWS connectors (shared); per-project Prometheus (URL is namespace-specific)
-#   6. Per project: environment, Kubernetes infra def, discovery agent, chaos infra v2
+#   5. Org-scoped delegate token + Kubernetes delegate on the EKS cluster
+#   6. Per project: K8s connector, Prometheus, environment, infra, discovery, chaos v2
+#   7. Per project: import chaos experiment from a hub template (if identities are set)
 #
 # PAT (HARNESS_PLATFORM_API_KEY) must be issued in the same account as account_id.
 #
@@ -223,10 +224,10 @@ variable "delegate_register_wait" {
   default     = "60s"
 }
 
-# --- Org connectors ---
+# --- Per-project K8s connector; optional org AWS ---
 
 variable "k8s_connector_id" {
-  description = "Org-level Kubernetes connector identifier. Empty = <resource_prefix>_eks. Infra refs org.<id>."
+  description = "Kubernetes connector identifier in each project (same id, different project). Empty = <resource_prefix>_eks. Infra refs this id (not org.<id>)."
   type        = string
   default     = ""
 }
@@ -369,4 +370,52 @@ variable "apply_chaos_install_command" {
   description = "Run any install_command Harness returns after registering chaos infra v2."
   type        = bool
   default     = true
+}
+
+# --- Experiment import (one template into every team project) ---
+
+variable "experiment_hub_identity" {
+  description = "Chaos hub in THIS account (workshop org or account-level). Example: org.workshop_chaos_hub. Empty = skip experiment import. Do not point at PnC."
+  type        = string
+  default     = ""
+}
+
+variable "experiment_template_identity" {
+  description = "Identity of an experiment template that already exists in this account's hub. Empty = skip import."
+  type        = string
+  default     = ""
+}
+
+variable "experiment_template_revision" {
+  type    = string
+  default = "v1"
+}
+
+variable "experiment_import_type" {
+  description = "LOCAL = independent copy per team. REFERENCE = stays linked to the template."
+  type        = string
+  default     = "LOCAL"
+
+  validation {
+    condition     = contains(["LOCAL", "REFERENCE"], var.experiment_import_type)
+    error_message = "experiment_import_type must be LOCAL or REFERENCE."
+  }
+}
+
+variable "experiment_name" {
+  description = "Experiment display name. Empty = template identity."
+  type        = string
+  default     = ""
+}
+
+variable "experiment_hub_org_id" {
+  description = "Org that owns the hub. Empty for account-level hubs; set to workshop for org-level hubs if hub_identity has no org. prefix."
+  type        = string
+  default     = ""
+}
+
+variable "experiment_hub_project_id" {
+  description = "Project that owns the hub. Empty for account/org hubs."
+  type        = string
+  default     = ""
 }

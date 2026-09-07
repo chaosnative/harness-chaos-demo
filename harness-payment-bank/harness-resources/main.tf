@@ -9,9 +9,9 @@
 #   3. Org Connector templates (K8s / AWS inherit-from-delegate, Prometheus)
 #   4. Projects team-N (one per namespace banking-N)
 #   5. Org delegate token + Helm on EKS; wait for registration
-#   6. Org K8s + AWS connectors (spec matches the templates; provider has no
-#      template_ref on connector resources)
-#   7. Per project: Prometheus, environment, infra, discovery, chaos v2
+#   6. Optional org AWS connector (not required for the workshop tree)
+#   7. Per project: K8s connector, Prometheus, environment, infra, discovery,
+#      chaos v2, experiment import from template (if template ids are set)
 #
 # terraform init && terraform apply
 # terraform output
@@ -146,7 +146,6 @@ locals {
 
   k8s_connector_id       = var.k8s_connector_id != "" ? var.k8s_connector_id : "${local.prefix_id}_eks"
   k8s_connector_name     = var.k8s_connector_name != "" ? var.k8s_connector_name : local.k8s_connector_id
-  k8s_connector_ref      = "org.${local.k8s_connector_id}"
   aws_connector_id       = var.aws_connector_id != "" ? var.aws_connector_id : "${local.prefix_id}_aws"
   aws_connector_name     = var.aws_connector_name != "" ? var.aws_connector_name : local.aws_connector_id
   prometheus_id_prefix   = var.prometheus_connector_id_prefix != "" ? var.prometheus_connector_id_prefix : "${local.prefix_id}_prometheus"
@@ -409,16 +408,19 @@ resource "time_sleep" "delegate_register" {
 }
 
 # -----------------------------------------------------------------------------
-# Org connectors (shared). Spec matches the org Connector templates.
-# Prometheus stays per project because prometheus.banking-N URLs differ.
+# Connectors. K8s + Prometheus are per project. Optional AWS stays org-level.
+# Spec matches the org Connector templates (provider has no template_ref).
 # -----------------------------------------------------------------------------
 
 resource "harness_platform_connector_kubernetes" "eks" {
+  for_each = local.projects
+
   identifier   = local.k8s_connector_id
   name         = local.k8s_connector_name
   org_id       = harness_platform_organization.this.identifier
-  description  = "Org Kubernetes connector. Spec matches template ${local.k8s_template_id}:${var.template_version}."
-  tags         = concat(local.tags, ["template:${local.k8s_template_id}"])
+  project_id   = harness_platform_project.this[each.key].identifier
+  description  = "Project Kubernetes connector for ${each.value.namespace}. Spec matches template ${local.k8s_template_id}:${var.template_version}."
+  tags         = concat(local.tags, ["template:${local.k8s_template_id}", "namespace:${each.value.namespace}"])
   force_delete = true
 
   inherit_from_delegate {
@@ -429,6 +431,7 @@ resource "harness_platform_connector_kubernetes" "eks" {
     time_sleep.delegate_register,
     harness_platform_template.k8s,
     data.harness_platform_template.k8s,
+    harness_platform_project.this,
   ]
 }
 
@@ -519,7 +522,7 @@ infrastructureDefinition:
   deploymentType: Kubernetes
   type: KubernetesDirect
   spec:
-    connectorRef: ${local.k8s_connector_ref}
+    connectorRef: ${local.k8s_connector_id}
     namespace: ${each.value.namespace}
     releaseName: release-<+INFRA_KEY>
   allowSimultaneousDeployments: true
@@ -608,7 +611,7 @@ resource "null_resource" "install_chaos" {
       set -euo pipefail
       CMD=${jsonencode(harness_chaos_infrastructure_v2.this[each.key].install_command)}
       if [ -z "$${CMD//[[:space:]]/}" ]; then
-        echo "No chaos install command for ${each.value.namespace}; DDCR will use org connector ${local.k8s_connector_ref}"
+        echo "No chaos install command for ${each.value.namespace}; DDCR will use project connector ${local.k8s_connector_id}"
         exit 0
       fi
       KUBECONFIG_FILE="/tmp/hpb-eks-${each.value.identifier}.kubeconfig"
@@ -648,8 +651,49 @@ output "delegate_name" {
   value = local.delegate_name
 }
 
-output "k8s_connector_ref" {
-  value = local.k8s_connector_ref
+output "k8s_connector_refs" {
+  value = {
+    for ns, connector in harness_platform_connector_kubernetes.eks :
+    ns => connector.identifier
+  }
+}
+
+resource "harness_chaos_experiment" "from_template" {
+  for_each = var.experiment_template_identity != "" && var.experiment_hub_identity != "" ? local.projects : {}
+
+  org_id     = harness_platform_organization.this.identifier
+  project_id = harness_platform_project.this[each.key].identifier
+
+  hub_identity      = var.experiment_hub_identity
+  hub_org_id        = var.experiment_hub_org_id != "" ? var.experiment_hub_org_id : null
+  hub_project_id    = var.experiment_hub_project_id != "" ? var.experiment_hub_project_id : null
+  template_identity = var.experiment_template_identity
+  revision          = var.experiment_template_revision
+  import_type       = var.experiment_import_type
+  infra_ref         = "${local.environment_id}/${local.infra_id}"
+  name              = var.experiment_name != "" ? var.experiment_name : var.experiment_template_identity
+  identity          = replace(var.experiment_template_identity, "-", "_")
+  description       = "Imported from template ${var.experiment_template_identity} for namespace ${each.value.namespace}"
+  tags              = concat(local.tags, ["namespace:${each.value.namespace}"])
+
+  lifecycle {
+    ignore_changes = [tags]
+  }
+
+  depends_on = [
+    harness_chaos_infrastructure_v2.this,
+    harness_platform_infrastructure.this,
+  ]
+}
+
+output "experiments" {
+  value = {
+    for ns, experiment in harness_chaos_experiment.from_template : ns => {
+      name     = experiment.name
+      identity = experiment.identity
+      id       = experiment.id
+    }
+  }
 }
 
 output "aws_connector_ref" {

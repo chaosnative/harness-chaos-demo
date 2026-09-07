@@ -2,7 +2,7 @@
 
 This is the internal map of the whole workshop. Read this first. The two Terraform folders are only *how* to build pieces; this file is *what exists and how it connects*.
 
-PnC (`orgs/PnC` in the chaos module) is the **shape** we copy: one org, one delegate, templates at org, then **one isolated project per team**. We do not copy PnC’s names or its account blindly.
+Org **PnC** is only a **layout reference** (one org, delegate, org templates, one project per team). We do **not** reuse PnC’s account, connectors, hubs, or names. Everything below is created fresh in org `workshop`.
 
 ## The three machines (do not mix them)
 
@@ -36,24 +36,15 @@ Same number. Attendee “team 1” breaks only `banking-1`.
 
 The token in secret `HARNESS_PLATFORM_API_KEY` / `Naren_Harness_Platform_API` must be created in **the same Harness account that should own org `workshop`**.
 
-That account id is:
+That is the account in the browser URL when you open **Organizations → workshop**, and pipeline variable `harness_account_id` / `TF_VAR_account_id`.
 
-- the `accountId=` in the browser URL when you will open **Organizations → workshop**, and
-- pipeline variable `harness_account_id` / `TF_VAR_account_id`.
-
-| If workshop should sit… | Create the PAT in… |
-| --- | --- |
-| Next to **PnC** (URL account `cTU1lRSWS2SSRV9phKvuOA`) | **My Profile → API Keys → Token** while logged into **that** account |
-| In the same account as pipeline `PROD` / `CHAOS` | That account (the id in *that* browser URL) |
+If the pipeline lives in `PROD` / `CHAOS` of that account (id `l7B_kbSEQD2wjrM7PShm5w`), set `harness_account_id` to **that** id and use a PAT from **that** account. Do not use a PnC-account PAT.
 
 Rules:
 
 1. PAT account = `TF_VAR_account_id` = URL account. Mismatch → **401 Unauthorized**.
 2. You need the **Token** string (`pat.<accountId>.…`), not the API key *name*.
-3. The pipeline can live in `PROD`/`CHAOS` of that same account. The pipeline’s home project is not org `workshop`.
-4. A PnC PAT cannot create `workshop` in a different account. Copying PnC’s *layout* does not mean copying PnC’s *account* unless you explicitly want workshop there.
-
-Account id is not a secret. The PAT is.
+3. The pipeline’s home project (`PROD` / `CHAOS`) is not org `workshop`.
 
 ## What gets created (target layout)
 
@@ -62,20 +53,19 @@ Harness account  <── PAT belongs here
 └── org workshop
     ├── delegate          hpb-workshop-delegate   (pod on hpb-eks)
     ├── templates         connector recipes (k8s / aws / prometheus)
-    ├── k8s connector     org.hpb_eks  (shared, inherit-from-delegate)
-    ├── aws connector     org.hpb_aws  (optional)
     └── project team-1    (attendee 1)     namespace banking-1
+        ├── k8s connector     hpb_eks
         ├── environment       hpb
-        ├── infra             hpb_k8s          → org.hpb_eks, namespace banking-1
+        ├── infra             hpb_k8s          → hpb_eks, namespace banking-1
         ├── prometheus        hpb-prometheus-team-1  → prometheus.banking-1
         ├── discovery         hpb-discovery-team-1
         ├── chaos infra v2    hpb-chaos-team-1
-        └── experiment        import from template (UI, not Terraform yet)
+        └── experiment        import from a **workshop** org/account hub template (TF_VAR_experiment_*)
     └── project team-2 … same pattern, namespace banking-2
 ```
 
-**Org (shared):** delegate, connector templates, K8s connector, optional AWS connector.  
-**Each project (isolated):** Prometheus (per-namespace URL), env, infra, discovery, chaos, experiments.
+**Org (shared):** delegate, connector templates, optional AWS connector.  
+**Each project (isolated):** K8s connector, Prometheus, env, infra, discovery, chaos, experiment import.
 
 ## Folders and state
 
@@ -122,7 +112,7 @@ Do not put both Terraform roots in one step. Do not add another Plan → Approve
 1. UI: **Account → Organizations → workshop → project team-1**.
 2. Confirm env `hpb`, infra `hpb_k8s`, discovery and chaos for `banking-1`.
 3. Cluster: `kubectl get pods -n harness-delegate-ng` and `-n banking-1`.
-4. **Import experiment from template** into `team-1` (and each team). Terraform does not do this yet.
+4. If `TF_VAR_experiment_template_identity` and `TF_VAR_experiment_hub_identity` were set, each `team-N` already has the imported experiment. Those identities must belong to a hub **you created in this account** (org `workshop` or account-level), not PnC.
 5. Run the experiment in `team-1`. Faults stay in `banking-1`.
 
 ### D. Tear down
@@ -146,10 +136,10 @@ Do not destroy `infrastructure/` just to rename teams.
 
 | Area | Change |
 | --- | --- |
-| `harness-resources` Terraform | Project `team_N`; **org** K8s connector `org.hpb_eks`; Prometheus **in the project**; infra `connectorRef` is `org.hpb_eks` |
+| `harness-resources` Terraform | Project `team_N`; **project** K8s connector `hpb_eks`; Prometheus in the project; infra `connectorRef` is `hpb_eks` |
 | Pipeline | Unique provisioner id; PAT + account id of **workshop** account; Helm on delegate; stage 2 after EKS |
 | Docs / talk | Say **team-1** for Harness, **banking-1** for kubectl |
-| Experiments | Still UI: import from org/account chaos templates into each `team-N` |
+| Experiments | Create chaos experiment templates once in org `workshop` (or account). Terraform imports them into each `team-N` when `TF_VAR_experiment_*` is set. |
 | PAT | Workshop account only (see above) |
 | AWS | No change: namespaces stay `banking-N` |
 
