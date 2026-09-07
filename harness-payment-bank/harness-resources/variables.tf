@@ -7,11 +7,11 @@
 #
 # What this root creates (one terraform apply):
 #   1. Organization
-#   2. Org Connector templates (K8s inherit-from-delegate, AWS inherit-from-delegate, Prometheus)
+#   2. Organization
 #   3. One Harness project per namespace: banking-N → project team_N / team-N
 #   4. Org-scoped delegate token + Kubernetes delegate on the EKS cluster
-#   6. Per project: K8s connector, Prometheus, environment, infra, discovery, chaos v2
-#   7. Per project: import chaos experiment from a hub template (if identities are set)
+#   5. Per project: K8s connector, Prometheus, environment, infra, discovery, chaos v2
+#   6. Per project: import chaos experiment from a hub template (if identities are set)
 #
 # PAT (HARNESS_PLATFORM_API_KEY) must be issued in the same account as account_id.
 #
@@ -138,55 +138,6 @@ variable "project_overrides" {
   default = {}
 }
 
-# --- Connector templates (org, created in the same apply) ---
-
-variable "create_connector_templates" {
-  description = "Create org Connector templates. Set false if they already exist in the org and should only be looked up."
-  type        = bool
-  default     = true
-}
-
-variable "template_version" {
-  type    = string
-  default = "v1"
-}
-
-variable "k8s_template_id" {
-  description = "Empty = <resource_prefix>_k8s_inherit_delegate"
-  type        = string
-  default     = ""
-}
-
-variable "k8s_template_name" {
-  description = "Empty = k8s_template_id"
-  type        = string
-  default     = ""
-}
-
-variable "aws_template_id" {
-  description = "Empty = <resource_prefix>_aws_inherit_delegate"
-  type        = string
-  default     = ""
-}
-
-variable "aws_template_name" {
-  description = "Empty = aws_template_id"
-  type        = string
-  default     = ""
-}
-
-variable "prometheus_template_id" {
-  description = "Empty = <resource_prefix>_prometheus"
-  type        = string
-  default     = ""
-}
-
-variable "prometheus_template_name" {
-  description = "Empty = prometheus_template_id"
-  type        = string
-  default     = ""
-}
-
 # --- Delegate ---
 
 variable "delegate_name" {
@@ -226,7 +177,7 @@ variable "delegate_register_wait" {
 variable "delegate_helm_timeout" {
   description = "Helm wait timeout in seconds for the workshop delegate release."
   type        = number
-  default     = 600
+  default     = 1200
 }
 
 variable "apply_retries" {

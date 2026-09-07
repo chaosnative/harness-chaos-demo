@@ -52,7 +52,7 @@ Rules:
 Harness account  <── PAT belongs here
 └── org workshop
     ├── delegate          hpb-workshop-delegate   (pod on hpb-eks)
-    ├── templates         connector recipes (k8s / aws / prometheus)
+    ├── templates         chaos experiment templates (hub; create once in UI if you import via TF)
     └── project team-1    (attendee 1)     namespace banking-1
         ├── k8s connector     hpb_eks
         ├── environment       hpb

@@ -6,12 +6,16 @@
 # Order:
 #   1. Read infrastructure remote state (cluster + banking-N) unless overridden
 #   2. Organization workshop
-#   3. Org Connector templates (K8s / AWS inherit-from-delegate, Prometheus)
-#   4. Projects team-N (one per namespace banking-N)
-#   5. Org delegate token + Helm on EKS; wait for registration
-#   6. Optional org AWS connector (not required for the workshop tree)
-#   7. Per project: K8s connector, Prometheus, environment, infra, discovery,
-#      chaos v2, experiment import from template (if template ids are set)
+#   3. Projects team-N (one per namespace banking-N)
+#   4. Org delegate token + Helm on EKS; wait for registration
+#   5. Optional org AWS connector
+#   6. Per project: K8s connector, Prometheus, environment, infra, discovery,
+#      chaos v2, experiment import from a chaos hub template (if ids are set)
+#
+# Connector "templates" are not created here. Harness NG template types do not
+# include Connector (only Step, Stage, Pipeline, …). Connectors are created
+# with harness_platform_connector_* (InheritFromDelegate). Chaos experiment
+# templates are a different product (hub); import uses harness_chaos_experiment.
 #
 # Failure / retry: do not terraform destroy this root on error. Re-run apply.
 # Resources already in state are left alone; missing ones are created.
@@ -138,13 +142,6 @@ locals {
   delegate_token_name = var.delegate_token_name != "" ? var.delegate_token_name : "${var.resource_prefix}-workshop-delegate-token"
   delegate_token      = var.decode_delegate_token ? base64decode(harness_platform_delegatetoken.this.value) : harness_platform_delegatetoken.this.value
 
-  k8s_template_id          = var.k8s_template_id != "" ? var.k8s_template_id : "${local.prefix_id}_k8s_inherit_delegate"
-  k8s_template_name        = var.k8s_template_name != "" ? var.k8s_template_name : local.k8s_template_id
-  aws_template_id          = var.aws_template_id != "" ? var.aws_template_id : "${local.prefix_id}_aws_inherit_delegate"
-  aws_template_name        = var.aws_template_name != "" ? var.aws_template_name : local.aws_template_id
-  prometheus_template_id   = var.prometheus_template_id != "" ? var.prometheus_template_id : "${local.prefix_id}_prometheus"
-  prometheus_template_name = var.prometheus_template_name != "" ? var.prometheus_template_name : local.prometheus_template_id
-
   k8s_connector_id       = var.k8s_connector_id != "" ? var.k8s_connector_id : "${local.prefix_id}_eks"
   k8s_connector_name     = var.k8s_connector_name != "" ? var.k8s_connector_name : local.k8s_connector_id
   aws_connector_id       = var.aws_connector_id != "" ? var.aws_connector_id : "${local.prefix_id}_aws"
@@ -190,123 +187,6 @@ resource "harness_platform_organization" "this" {
 }
 
 # -----------------------------------------------------------------------------
-# Connector templates (org). Create once, or look up if they already exist.
-# Templates are recipes. Connector resources below use the same spec because
-# harness_platform_connector_* has no template_ref (unlike Custom SM).
-# -----------------------------------------------------------------------------
-
-data "harness_platform_template" "k8s" {
-  count = var.create_connector_templates ? 0 : 1
-
-  identifier = local.k8s_template_id
-  version    = var.template_version
-  org_id     = harness_platform_organization.this.identifier
-}
-
-data "harness_platform_template" "aws" {
-  count = var.create_connector_templates ? 0 : 1
-
-  identifier = local.aws_template_id
-  version    = var.template_version
-  org_id     = harness_platform_organization.this.identifier
-}
-
-data "harness_platform_template" "prometheus" {
-  count = var.create_connector_templates || !var.create_prometheus_connectors ? 0 : 1
-
-  identifier = local.prometheus_template_id
-  version    = var.template_version
-  org_id     = harness_platform_organization.this.identifier
-}
-
-resource "harness_platform_template" "k8s" {
-  count = var.create_connector_templates ? 1 : 0
-
-  identifier = local.k8s_template_id
-  name       = local.k8s_template_name
-  org_id     = harness_platform_organization.this.identifier
-  version    = var.template_version
-  is_stable  = true
-  comments   = "HPB workshop Kubernetes connector template (InheritFromDelegate)"
-  tags       = local.tags
-
-  template_yaml = <<-EOT
-template:
-  name: ${local.k8s_template_name}
-  identifier: ${local.k8s_template_id}
-  versionLabel: ${var.template_version}
-  type: Connector
-  orgIdentifier: ${harness_platform_organization.this.identifier}
-  tags: {}
-  spec:
-    type: K8sCluster
-    spec:
-      credential:
-        type: InheritFromDelegate
-        spec:
-          delegateSelectors: <+input>
-  EOT
-}
-
-resource "harness_platform_template" "aws" {
-  count = var.create_connector_templates ? 1 : 0
-
-  identifier = local.aws_template_id
-  name       = local.aws_template_name
-  org_id     = harness_platform_organization.this.identifier
-  version    = var.template_version
-  is_stable  = true
-  comments   = "HPB workshop AWS connector template (InheritFromDelegate)"
-  tags       = local.tags
-
-  template_yaml = <<-EOT
-template:
-  name: ${local.aws_template_name}
-  identifier: ${local.aws_template_id}
-  versionLabel: ${var.template_version}
-  type: Connector
-  orgIdentifier: ${harness_platform_organization.this.identifier}
-  tags: {}
-  spec:
-    type: Aws
-    spec:
-      credential:
-        type: InheritFromDelegate
-        spec:
-          delegateSelectors: <+input>
-          region: <+input>
-      executeOnDelegate: true
-  EOT
-}
-
-resource "harness_platform_template" "prometheus" {
-  count = var.create_connector_templates ? 1 : 0
-
-  identifier = local.prometheus_template_id
-  name       = local.prometheus_template_name
-  org_id     = harness_platform_organization.this.identifier
-  version    = var.template_version
-  is_stable  = true
-  comments   = "HPB workshop Prometheus connector template"
-  tags       = local.tags
-
-  template_yaml = <<-EOT
-template:
-  name: ${local.prometheus_template_name}
-  identifier: ${local.prometheus_template_id}
-  versionLabel: ${var.template_version}
-  type: Connector
-  orgIdentifier: ${harness_platform_organization.this.identifier}
-  tags: {}
-  spec:
-    type: Prometheus
-    spec:
-      url: <+input>
-      delegateSelectors: <+input>
-  EOT
-}
-
-# -----------------------------------------------------------------------------
 # Projects (one per Kubernetes namespace)
 # -----------------------------------------------------------------------------
 
@@ -349,9 +229,9 @@ resource "helm_release" "delegate" {
   chart      = "harness-delegate-ng"
 
   create_namespace = false
-  wait             = true
-  wait_for_jobs    = false
-  # Non-atomic: a timeout must not roll back a running delegate. Retry apply upgrades in place.
+  # Ready is polled by null_resource.delegate_ready so Helm is not killed by wait timeout.
+  wait            = false
+  wait_for_jobs   = false
   atomic          = false
   timeout         = var.delegate_helm_timeout
   cleanup_on_fail = false
@@ -455,7 +335,7 @@ resource "time_sleep" "delegate_register" {
 
 # -----------------------------------------------------------------------------
 # Connectors. K8s + Prometheus are per project. Optional AWS stays org-level.
-# Spec matches the org Connector templates (provider has no template_ref).
+# InheritFromDelegate — same spec as a Connector recipe; NG has no Connector template type.
 # -----------------------------------------------------------------------------
 
 resource "harness_platform_connector_kubernetes" "eks" {
@@ -465,8 +345,8 @@ resource "harness_platform_connector_kubernetes" "eks" {
   name         = local.k8s_connector_name
   org_id       = harness_platform_organization.this.identifier
   project_id   = harness_platform_project.this[each.key].identifier
-  description  = "Project Kubernetes connector for ${each.value.namespace}. Spec matches template ${local.k8s_template_id}:${var.template_version}."
-  tags         = concat(local.tags, ["template:${local.k8s_template_id}", "namespace:${each.value.namespace}"])
+  description  = "Project Kubernetes connector for namespace ${each.value.namespace} (InheritFromDelegate)."
+  tags         = concat(local.tags, ["namespace:${each.value.namespace}"])
   force_delete = true
 
   inherit_from_delegate {
@@ -475,8 +355,6 @@ resource "harness_platform_connector_kubernetes" "eks" {
 
   depends_on = [
     time_sleep.delegate_register,
-    harness_platform_template.k8s,
-    data.harness_platform_template.k8s,
     harness_platform_project.this,
   ]
 }
@@ -487,8 +365,8 @@ resource "harness_platform_connector_aws" "eks" {
   identifier          = local.aws_connector_id
   name                = local.aws_connector_name
   org_id              = harness_platform_organization.this.identifier
-  description         = "Org AWS connector. Spec matches template ${local.aws_template_id}:${var.template_version}."
-  tags                = concat(local.tags, ["template:${local.aws_template_id}"])
+  description         = "Org AWS connector (InheritFromDelegate)."
+  tags                = local.tags
   execute_on_delegate = true
   force_delete        = true
 
@@ -497,11 +375,7 @@ resource "harness_platform_connector_aws" "eks" {
     region             = var.aws_region
   }
 
-  depends_on = [
-    time_sleep.delegate_register,
-    harness_platform_template.aws,
-    data.harness_platform_template.aws,
-  ]
+  depends_on = [time_sleep.delegate_register]
 }
 
 resource "harness_platform_connector_prometheus" "namespace" {
@@ -511,15 +385,13 @@ resource "harness_platform_connector_prometheus" "namespace" {
   name               = "${local.prometheus_name_prefix}-${each.value.name}"
   org_id             = harness_platform_organization.this.identifier
   project_id         = harness_platform_project.this[each.key].identifier
-  description        = "Prometheus in namespace ${each.value.namespace}. Spec matches template ${local.prometheus_template_id}:${var.template_version}."
-  tags               = concat(local.tags, ["template:${local.prometheus_template_id}", "namespace:${each.value.namespace}"])
+  description        = "Prometheus in namespace ${each.value.namespace}."
+  tags               = concat(local.tags, ["namespace:${each.value.namespace}"])
   url                = "http://prometheus.${each.value.namespace}.svc.cluster.local:${var.prometheus_port}"
   delegate_selectors = [local.delegate_name]
 
   depends_on = [
     time_sleep.delegate_register,
-    harness_platform_template.prometheus,
-    data.harness_platform_template.prometheus,
     harness_platform_project.this,
   ]
 }
