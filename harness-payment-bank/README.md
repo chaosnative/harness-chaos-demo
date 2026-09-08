@@ -61,7 +61,7 @@ Rules:
 | K8s connector (per project) | `hpb_eks` | Underscore OK (Harness ID, not a Helm release name) |
 | Environment | `hpb` | |
 | CD / chaos infra id | **`hpbk8s`** | Letters+digits only. Display name `hpb-k8s`. Never `hpb_k8s` or `hpb-k8s` as the identifier |
-| Discovery in Terraform | `harness_service_discovery_agent.workshop` | Old address `.this` is `removed` (not destroyed) |
+| Discovery in Terraform | `harness_service_discovery_agent.workshop` | Inclusion = mapped ns only (`team_1` → `banking-1`). Old address `.this` is `removed` |
 | Chaos infra | `hpb-chaos-team-N` | Helm event-watcher name is `event-watcher-hpbk8s` |
 | S3 (workshop TF) | bucket `hpb-demo-tfstate-naren`, key `hpb-harness/terraform.tfstate` | Lock table `hpb-demo-tf-lock` |
 | Git branch for `harness-resources/` | `automate_workshop` | Stage 1 EKS may still use `main` |
@@ -86,7 +86,7 @@ Harness account  <── PAT belongs here (cTU1l…)
 ```
 
 **Org (shared):** delegate, optional AWS connector. **No** Connector templates (NG has no that type).  
-**Each project (isolated):** K8s connector, Prometheus, env, infra `hpbk8s`, discovery, chaos, optional experiment import.
+**Each project (isolated):** K8s connector, Prometheus, env, infra `hpbk8s`, discovery (Inclusion = that project's namespace only, e.g. team-1 → `banking-1`), chaos, optional experiment import.
 
 `harness-resources/` apply order: remote state (EKS + `banking-N`) → org → projects → delegate Helm on **hpb-eks** → connectors / env / infra → discovery → chaos v2 → experiment import only if both `TF_VAR_experiment_hub_identity` and `TF_VAR_experiment_template_identity` are set (hub in **this** account).
 

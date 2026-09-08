@@ -512,8 +512,9 @@ resource "harness_service_discovery_agent" "workshop" {
       disable_namespace_creation = true
     }
     data {
+      # Inclusion only — mutually exclusive with Exclusion (blacklisted_namespaces).
+      # team-1 → banking-1, team-2 → banking-2, … one namespace per project.
       observed_namespaces      = [each.value.namespace]
-      blacklisted_namespaces   = ["kube-system", "kube-public", var.delegate_namespace]
       collection_window_in_min = 10
       cron {
         expression = var.discovery_cron_expression
