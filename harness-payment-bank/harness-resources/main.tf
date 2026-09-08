@@ -162,9 +162,17 @@ locals {
   prometheus_id_prefix   = var.prometheus_connector_id_prefix != "" ? var.prometheus_connector_id_prefix : "${local.prefix_id}_prometheus"
   prometheus_name_prefix = var.prometheus_connector_name_prefix != "" ? var.prometheus_connector_name_prefix : "${var.resource_prefix}-prometheus"
 
-  environment_id        = var.environment_id != "" ? var.environment_id : local.prefix_id
-  environment_name      = var.environment_name != "" ? var.environment_name : local.environment_id
-  infra_id              = var.infra_id != "" ? var.infra_id : "${replace(var.resource_prefix, "-", "")}k8s"
+  environment_id   = var.environment_id != "" ? var.environment_id : local.prefix_id
+  environment_name = var.environment_name != "" ? var.environment_name : local.environment_id
+  # A STEM, not a full identifier. The per-project suffix is added in
+  # local.projects. Four projects sharing one infra identifier also share one
+  # discovery agent identity, and the agent identity is what names the
+  # collector objects the delegate installs — so four agents were installing
+  # and uninstalling the same objects in the same namespace, cancelling each
+  # other out. Must stay lowercase alphanumeric: it becomes a Helm release
+  # stem (event-watcher-<infra_id>), and Harness IDs forbid hyphens while Helm
+  # forbids underscores.
+  infra_id_stem         = var.infra_id != "" ? var.infra_id : "${replace(var.resource_prefix, "-", "")}k8s"
   infra_name            = var.infra_name != "" ? var.infra_name : "${var.resource_prefix}-k8s"
   discovery_name_prefix = var.discovery_agent_name_prefix != "" ? var.discovery_agent_name_prefix : "${var.resource_prefix}-discovery"
   chaos_name_prefix     = var.chaos_infra_name_prefix != "" ? var.chaos_infra_name_prefix : "${var.resource_prefix}-chaos"
@@ -192,6 +200,10 @@ locals {
       index      = local.ns_index[ns]
       identifier = coalesce(try(var.project_overrides[ns].identifier, null), "${local.team_prefix_id}_${local.ns_index[ns]}")
       name       = coalesce(try(var.project_overrides[ns].name, null), "${local.team_prefix_name}-${local.ns_index[ns]}")
+      # ns_index falls back to the namespace with hyphens turned into
+      # underscores when it does not end in digits, and an underscore here
+      # would produce an invalid Helm release stem. Strip to alphanumerics.
+      infra_id = "${local.infra_id_stem}${lower(replace(local.ns_index[ns], "/[^0-9A-Za-z]/", ""))}"
     }
   }
 }
@@ -492,7 +504,7 @@ resource "harness_platform_environment" "this" {
 resource "harness_platform_infrastructure" "this" {
   for_each = local.projects
 
-  identifier      = local.infra_id
+  identifier      = each.value.infra_id
   name            = local.infra_name
   org_id          = local.org_identifier
   project_id      = harness_platform_project.this[each.key].identifier
@@ -509,7 +521,7 @@ resource "harness_platform_infrastructure" "this" {
   yaml = <<-EOT
 infrastructureDefinition:
   name: ${local.infra_name}
-  identifier: ${local.infra_id}
+  identifier: ${each.value.infra_id}
   orgIdentifier: ${local.org_identifier}
   projectIdentifier: ${each.value.identifier}
   environmentRef: ${local.environment_id}
@@ -762,9 +774,15 @@ resource "null_resource" "discovery_collector_ready" {
             kubectl get cronjob,job,deploy,pods -n "$NS" -o wide || true
             echo "--- discovery service account ---"
             kubectl get sa ${jsonencode(var.discovery_service_account)} -n "$NS" || true
-            echo "--- delegate task activity ---"
+            # Do not filter on 'task': it matches FutureTask.run in every
+            # stack trace and buries the one line that says why the install
+            # failed. Drop the JVM metrics spam, then keep failure vocabulary.
+            echo "--- delegate install failures ---"
             kubectl logs -n "$DELEGATE_NS" -l app.kubernetes.io/instance="$DELEGATE" \
-              --tail=200 2>/dev/null | grep -iE 'discovery|servicediscovery|install|task' || true
+              --tail=600 2>/dev/null \
+              | grep -vE 'cpu-system=|heap-|non-heap|maxExecuting|taskExecutor' \
+              | grep -iE 'error|exception|caused by|forbidden|denied|already exists|conflict|unauthoriz|not found|servicediscovery|discovery' \
+              | tail -60 || true
             exit 1
           fi
           echo "Only $COUNT of $EXPECTED collectors are up; the mechanism works"
@@ -932,7 +950,7 @@ resource "harness_chaos_experiment" "from_template" {
   template_identity = var.experiment_template_identity
   revision          = var.experiment_template_revision
   import_type       = var.experiment_import_type
-  infra_ref         = "${local.environment_id}/${local.infra_id}"
+  infra_ref         = "${local.environment_id}/${each.value.infra_id}"
   name              = var.experiment_name != "" ? var.experiment_name : var.experiment_template_identity
   identity          = replace(var.experiment_template_identity, "-", "_")
   description       = "Imported from template ${var.experiment_template_identity} for namespace ${each.value.namespace}"

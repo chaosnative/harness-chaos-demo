@@ -325,6 +325,8 @@ variable "environment_type" {
   }
 }
 
+# Stem only — each project appends its namespace index (hpbk8s1, hpbk8s2, ...).
+# Do not set this to a value you expect to see verbatim in the UI.
 variable "infra_id" {
   description = "CD infrastructure identifier and Chaos event-watcher Helm stem. Harness forbids hyphens; Helm forbids underscores. Empty = <resource_prefix without hyphens>k8s (hpbk8s)."
   type        = string
