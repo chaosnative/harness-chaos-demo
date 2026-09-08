@@ -69,11 +69,6 @@ terraform {
       source  = "hashicorp/null"
       version = "~> 3.2"
     }
-    # Probes live collector state at plan time so a re-run self-heals.
-    external = {
-      source  = "hashicorp/external"
-      version = "~> 2.3"
-    }
   }
 }
 
@@ -469,13 +464,15 @@ resource "harness_platform_connector_aws" "eks" {
 resource "harness_platform_connector_prometheus" "namespace" {
   for_each = var.create_prometheus_connectors ? local.projects : {}
 
-  identifier         = "${local.prometheus_id_prefix}_${each.value.identifier}"
-  name               = "${local.prometheus_name_prefix}-${each.value.name}"
-  org_id             = local.org_identifier
-  project_id         = harness_platform_project.this[each.key].identifier
-  description        = "Prometheus in namespace ${each.value.namespace}."
-  tags               = concat(local.tags, ["namespace:${each.value.namespace}"])
-  url                = "http://prometheus.${each.value.namespace}.svc.cluster.local:${var.prometheus_port}"
+  identifier  = "${local.prometheus_id_prefix}_${each.value.identifier}"
+  name        = "${local.prometheus_name_prefix}-${each.value.name}"
+  org_id      = local.org_identifier
+  project_id  = harness_platform_project.this[each.key].identifier
+  description = "Prometheus in namespace ${each.value.namespace}."
+  tags        = concat(local.tags, ["namespace:${each.value.namespace}"])
+  # Trailing slash is not cosmetic: the API stores the URL normalised with one,
+  # so writing it without produces an update-in-place on every single plan.
+  url                = "http://prometheus.${each.value.namespace}.svc.cluster.local:${var.prometheus_port}/"
   delegate_selectors = [local.delegate_name]
 
   depends_on = [
@@ -598,63 +595,33 @@ resource "kubernetes_cluster_role_binding_v1" "discovery" {
   }
 }
 
-# The agent RECORD is created by an API call, but the collector that does the
-# scanning is installed by a DELEGATE TASK. An agent created while the delegate
-# could not accept tasks stays permanently hollow: Terraform sees the record as
-# current, re-issues nothing, and no amount of re-running fixes it. So the
-# cluster is probed at plan time and a missing collector recreates the agents by
-# itself, with no version string to remember to bump.
+# Bump discovery_scope_version to force a reinstall after changing install
+# namespace, service account or cron.
 #
-# This program must never fail. A data source that errors aborts the whole
-# apply, so no kubectl, no aws, an unreachable cluster or an absent namespace
-# all report "unknown", which is deliberately treated as healthy: guessing
-# "missing" there would replace every agent on every run.
-data "external" "discovery_collectors" {
-  program = ["bash", "-c", <<-EOT
-    set -uo pipefail
-    NS=${jsonencode(local.discovery_install_ns)}
-    CLUSTER=${jsonencode(local.cluster_name)}
-    REGION=${jsonencode(var.aws_region)}
-    EXPECTED=${length(local.projects)}
-    KC="/tmp/hpb-collector-probe.kubeconfig"
-
-    STATUS="unknown"
-    COUNT=0
-
-    if command -v aws >/dev/null 2>&1 && command -v kubectl >/dev/null 2>&1; then
-      if aws eks update-kubeconfig --region "$REGION" --name "$CLUSTER" --kubeconfig "$KC" >/dev/null 2>&1; then
-        if OUT=$(KUBECONFIG="$KC" kubectl get cronjob -n "$NS" --no-headers 2>/dev/null); then
-          COUNT=$(printf '%s\n' "$OUT" | grep -c . || true)
-          if [ "$COUNT" -ge "$EXPECTED" ]; then
-            STATUS="present"
-          else
-            STATUS="missing"
-          fi
-        fi
-      fi
-    fi
-
-    printf '{"status":"%s","count":"%s"}\n' "$STATUS" "$COUNT"
-  EOT
-  ]
-}
-
-locals {
-  discovery_collector_status = try(data.external.discovery_collectors.result.status, "unknown")
-  discovery_collector_count  = tonumber(try(data.external.discovery_collectors.result.count, "0"))
-  discovery_needs_reinstall  = var.discovery_autoheal && local.discovery_collector_status == "missing"
-}
-
-# Replacing an agent deletes and recreates its record, which is what re-issues
-# the install task. Healing therefore costs one replacement on the run that
-# detects the breakage, plus one on the run after it as the signal settles back
-# to "ok" — then it is stable indefinitely. Set discovery_autoheal = false
-# during a live workshop, where attendees have built application maps on top of
-# these agents and an unexpected replacement would orphan them.
+# Do NOT reintroduce a kubectl-based "is the collector running" probe here. The
+# collector is a short-lived Job (reported by the API as sd-cluster-<suffix>,
+# status Succeeded) that is garbage-collected once it finishes, so its absence
+# from the cluster says nothing at all — an earlier version of this file polled
+# for a CronJob that never exists in any state and failed a perfectly healthy
+# apply. Read installation_details and service_count in the
+# discovery_installation output instead: that is the API's own answer.
 resource "terraform_data" "discovery_cluster_scope" {
+  input = var.discovery_scope_version
+}
+
+# org_identifier, project_identifier, environment_identifier and
+# infra_identifier are immutable server-side; the API answers an update with
+# "cannot update immutable fields". The provider does not mark them ForceNew,
+# so Terraform cheerfully plans an in-place update that can only fail. Bind the
+# agent's replacement to them so a change recreates the agent instead.
+resource "terraform_data" "discovery_agent_binding" {
+  for_each = local.projects
+
   input = join("|", [
-    var.discovery_scope_version,
-    local.discovery_needs_reinstall ? "reinstall" : "ok",
+    local.org_identifier,
+    each.value.identifier,
+    local.environment_id,
+    each.value.infra_id,
   ])
 }
 
@@ -697,7 +664,10 @@ resource "harness_service_discovery_agent" "workshop" {
   }
 
   lifecycle {
-    replace_triggered_by = [terraform_data.discovery_cluster_scope]
+    replace_triggered_by = [
+      terraform_data.discovery_cluster_scope,
+      terraform_data.discovery_agent_binding[each.key],
+    ]
   }
 
   depends_on = [
@@ -706,98 +676,6 @@ resource "harness_service_discovery_agent" "workshop" {
     kubernetes_cluster_role_binding_v1.discovery,
     time_sleep.delegate_register,
   ]
-}
-
-# A created agent record proves only that an API call succeeded. The collector
-# is installed separately by a delegate task, so "agent exists and says
-# Connected" is compatible with zero collectors in the cluster — which is
-# exactly the state that produced one stale Discovery History entry, no
-# cluster-level logs and an empty Namespace dropdown. Assert the collector is
-# really there. upgrader.enabled is false on the delegate, so the only CronJobs
-# in the install namespace are discovery collectors.
-resource "null_resource" "discovery_collector_ready" {
-  count = var.verify_discovery_collector ? 1 : 0
-
-  triggers = {
-    agents = join(",", [for a in harness_service_discovery_agent.workshop : a.identity])
-    scope  = terraform_data.discovery_cluster_scope.output
-  }
-
-  provisioner "local-exec" {
-    interpreter = ["/bin/bash", "-c"]
-    command     = <<-EOT
-      set -euo pipefail
-      NS=${jsonencode(local.discovery_install_ns)}
-      CLUSTER=${jsonencode(local.cluster_name)}
-      REGION=${jsonencode(var.aws_region)}
-      DELEGATE=${jsonencode(local.delegate_name)}
-      DELEGATE_NS=${jsonencode(var.delegate_namespace)}
-      EXPECTED=${length(local.projects)}
-      RETRIES=${var.apply_retries}
-      DELAY=${var.apply_retry_interval}
-      KUBECONFIG_FILE="/tmp/hpb-discovery.kubeconfig"
-
-      # Stage 2 does not install kubectl/aws; it inherits them from stage 1 on
-      # the same delegate. Running this stage alone on a recycled delegate pod
-      # leaves them absent, and "cannot verify" must not read as "broken".
-      if ! command -v aws >/dev/null 2>&1 || ! command -v kubectl >/dev/null 2>&1; then
-        echo "aws or kubectl missing on this delegate; skipping collector verification"
-        exit 0
-      fi
-
-      aws eks update-kubeconfig --region "$REGION" --name "$CLUSTER" --kubeconfig "$KUBECONFIG_FILE"
-      export KUBECONFIG="$KUBECONFIG_FILE"
-
-      echo "Waiting for $EXPECTED discovery collector CronJob(s) in $NS"
-      i=1
-      while [ "$i" -le "$RETRIES" ]; do
-        COUNT=0
-        if OUT=$(kubectl get cronjob -n "$NS" --no-headers 2>/dev/null); then
-          COUNT=$(printf '%s\n' "$OUT" | grep -c . || true)
-        fi
-        echo "collector attempt $i/$RETRIES: found $COUNT of $EXPECTED"
-
-        if [ "$COUNT" -ge "$EXPECTED" ]; then
-          kubectl get cronjob -n "$NS" || true
-          exit 0
-        fi
-
-        if [ "$i" -eq "$RETRIES" ]; then
-          if [ "$COUNT" -eq 0 ]; then
-            echo "No discovery collector was installed in $NS."
-            echo "The agent records exist in Harness but the delegate never ran"
-            echo "their install task, so nothing scans the cluster and the"
-            echo "Namespace dropdown stays empty. Check the delegate is"
-            echo "registered, then bump terraform_data.discovery_cluster_scope"
-            echo "to re-issue the install task."
-            echo "--- workloads in $NS ---"
-            kubectl get cronjob,job,deploy,pods -n "$NS" -o wide || true
-            echo "--- discovery service account ---"
-            kubectl get sa ${jsonencode(var.discovery_service_account)} -n "$NS" || true
-            # Do not filter on 'task': it matches FutureTask.run in every
-            # stack trace and buries the one line that says why the install
-            # failed. Drop the JVM metrics spam, then keep failure vocabulary.
-            echo "--- delegate install failures ---"
-            kubectl logs -n "$DELEGATE_NS" -l app.kubernetes.io/instance="$DELEGATE" \
-              --tail=600 2>/dev/null \
-              | grep -vE 'cpu-system=|heap-|non-heap|maxExecuting|taskExecutor' \
-              | grep -iE 'error|exception|caused by|forbidden|denied|already exists|conflict|unauthoriz|not found|servicediscovery|discovery' \
-              | tail -60 || true
-            exit 1
-          fi
-          echo "Only $COUNT of $EXPECTED collectors are up; the mechanism works"
-          echo "but some agents lag. Not failing the apply."
-          kubectl get cronjob -n "$NS" || true
-          exit 0
-        fi
-
-        sleep "$DELAY"
-        i=$((i + 1))
-      done
-    EOT
-  }
-
-  depends_on = [harness_service_discovery_agent.workshop]
 }
 
 # installation_details is computed by the provider from the API, so a green
