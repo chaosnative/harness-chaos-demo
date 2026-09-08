@@ -32,15 +32,18 @@ variable "harness_gateway_endpoint" {
 }
 
 # Cluster-specific, and NOT the same value as harness_gateway_endpoint — the NG
-# gateway routes by account id in the path so it works from any cluster, while
-# the delegate hits the legacy manager API which does not. app.harness.io is
-# correct for this account (its UI is served from there), so leave it alone.
-# Only change it if the delegate install command in Account Settings ->
-# Delegates shows a different managerEndpoint / MANAGER_HOST_AND_PORT.
+# gateway routes by account id in the path so plain app.harness.io works there,
+# while the delegate hits the legacy manager API which does not. This account
+# lives on the "gratis" cluster: the UI is served from app.harness.io but the
+# delegate must use the /gratis suffix. Plain https://app.harness.io returns
+# 401 ACCOUNT_DOES_NOT_EXIST on every delegate call, so the delegate never
+# registers and no delegate task (including the discovery collector install)
+# ever runs. Value taken verbatim from the install command on
+# /account/<acct>/module/chaos/settings/delegates/list.
 variable "manager_endpoint" {
-  description = "Delegate manager URL for THIS account's Harness cluster. Verify against the managerEndpoint in the delegate install command under Account Settings → Delegates."
+  description = "Delegate manager URL for THIS account's Harness cluster, including any /gratis suffix. Copy verbatim from managerEndpoint in the delegate install command under Account Settings → Delegates."
   type        = string
-  default     = "https://app.harness.io"
+  default     = "https://app.harness.io/gratis"
 
   validation {
     condition     = can(regex("^https://", var.manager_endpoint)) && !can(regex("/gateway/?$", var.manager_endpoint))
@@ -179,6 +182,14 @@ variable "delegate_replicas" {
   default = 1
 }
 
+# Pinned to the image in the UI install command that registered successfully.
+# Empty = let the chart pick its default, which may lag the account's cluster.
+variable "delegate_docker_image" {
+  description = "delegateDockerImage for the Helm chart. Empty uses the chart default. Pinned by default so every team gets the image proven to register."
+  type        = string
+  default     = "us-docker.pkg.dev/gar-prod-setup/harness-public/harness/delegate:26.08.89804"
+}
+
 # Escape hatch only. Keep true for a pipeline-driven workshop: Terraform must
 # own the delegate for the setup to be reproducible across all N teams.
 # WARNING: flipping this to false while helm_release.delegate is already in
@@ -191,10 +202,15 @@ variable "manage_delegate" {
   default     = true
 }
 
+# The chart's delegateToken value wants the BASE64 form, which is exactly what
+# harness_platform_delegatetoken.value already returns ("Value of the delegate
+# token. Encoded in base64." per the provider schema). The working install
+# command passes that base64 string through untouched, so base64decode() here
+# would hand the delegate a token the manager cannot match. Keep this false.
 variable "decode_delegate_token" {
-  description = "Provider returns the token base64-encoded. Set false only if helm registration fails."
+  description = "false = pass harness_platform_delegatetoken.value straight through, matching the base64 delegateToken in the UI install command. true base64-decodes it and registration fails."
   type        = bool
-  default     = true
+  default     = false
 }
 
 variable "delegate_register_wait" {

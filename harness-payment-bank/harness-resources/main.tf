@@ -276,40 +276,51 @@ resource "helm_release" "delegate" {
   upgrade_install = true
   take_ownership  = true
 
-  set = [
-    {
-      name  = "delegateName"
-      value = local.delegate_name
-    },
-    {
-      name  = "accountId"
-      value = var.account_id
-    },
-    {
-      name  = "managerEndpoint"
-      value = var.manager_endpoint
-    },
-    {
-      name  = "replicas"
-      value = tostring(var.delegate_replicas)
-    },
-    {
-      name  = "nextGen"
-      value = "true"
-    },
-    {
-      name  = "k8sPermissionsType"
-      value = "CLUSTER_ADMIN"
-    },
-    {
-      name  = "upgrader.enabled"
-      value = "false"
-    },
-    {
-      name  = "tags"
-      value = local.delegate_name
-    },
-  ]
+  # Mirrors the UI install command that registers successfully. tags and
+  # k8sPermissionsType are additions: tags backs delegate_selectors on the
+  # connectors, CLUSTER_ADMIN is needed for chaos and discovery.
+  set = concat(
+    [
+      {
+        name  = "delegateName"
+        value = local.delegate_name
+      },
+      {
+        name  = "accountId"
+        value = var.account_id
+      },
+      {
+        name  = "managerEndpoint"
+        value = var.manager_endpoint
+      },
+      {
+        name  = "replicas"
+        value = tostring(var.delegate_replicas)
+      },
+      {
+        name  = "nextGen"
+        value = "true"
+      },
+      {
+        name  = "k8sPermissionsType"
+        value = "CLUSTER_ADMIN"
+      },
+      {
+        name  = "upgrader.enabled"
+        value = "false"
+      },
+      {
+        name  = "tags"
+        value = local.delegate_name
+      },
+    ],
+    var.delegate_docker_image != "" ? [
+      {
+        name  = "delegateDockerImage"
+        value = var.delegate_docker_image
+      },
+    ] : [],
+  )
 
   set_sensitive = [
     {
