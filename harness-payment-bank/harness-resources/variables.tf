@@ -318,15 +318,21 @@ variable "discovery_installation_type" {
 }
 
 variable "discovery_install_namespace" {
-  description = "Dedicated namespace for collector pods (not the app ns). Empty = create hpb-sd-N per team. Inclusion still watches banking-N."
+  description = "Where collector pods run. Empty = delegate namespace (harness-delegate-ng), same as PnC. Inclusion still watches banking-N. Do not use hpb-sd-N."
   type        = string
   default     = ""
 }
 
-variable "discovery_cron_expression" {
-  description = "Collector schedule. Empty/omitted cron makes install fail with gocron interval 0."
+variable "discovery_service_account" {
+  description = "Service account in the install namespace. PnC uses chaos-delegate. Created in harness-delegate-ng with cluster-admin."
   type        = string
-  default     = "*/10 * * * *"
+  default     = "chaos-delegate"
+}
+
+variable "discovery_cron_expression" {
+  description = "Collector schedule. UI requires minutes >= 15. PnC uses 0/15 * * * *. */10 is rejected and Last Discovery stays N/A."
+  type        = string
+  default     = "0/15 * * * *"
 }
 
 variable "import_discovery_namespaces" {

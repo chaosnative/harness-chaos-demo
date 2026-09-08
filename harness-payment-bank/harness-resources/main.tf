@@ -495,30 +495,45 @@ removed {
   lifecycle { destroy = false }
 }
 
-# Dedicated install ns per team (hpb-sd-1, …). Agent Namespace is where
-# collectors run — not the app ns. PnC agent DA-banking-1; the Namespace
-# dropdown lists K8s ns banking-1 (Inclusion), not the agent name.
-resource "kubernetes_namespace_v1" "discovery" {
-  for_each = var.discovery_install_namespace == "" ? local.projects : {}
-
-  wait_for_default_service_account = true
-
+# PnC DA-banking-1: install ns harness-delegate-ng, SA chaos-delegate, cron 0/15.
+# Inclusion banking-1 is the Namespace dropdown. Do not install in hpb-sd-N.
+resource "kubernetes_service_account_v1" "discovery" {
   metadata {
-    name = "${var.resource_prefix}-sd-${each.value.index}"
+    name      = var.discovery_service_account
+    namespace = kubernetes_namespace_v1.delegate.metadata[0].name
     labels = {
       "app.kubernetes.io/name"       = "harness-service-discovery"
       "app.kubernetes.io/part-of"    = "hpb-workshop"
       "app.kubernetes.io/managed-by" = "terraform"
-      "hpb.harness.io/app-namespace" = each.value.namespace
+    }
+  }
+}
+
+resource "kubernetes_cluster_role_binding_v1" "discovery" {
+  metadata {
+    name = "${var.discovery_service_account}-cluster-admin"
+    labels = {
+      "app.kubernetes.io/part-of"    = "hpb-workshop"
+      "app.kubernetes.io/managed-by" = "terraform"
     }
   }
 
-  depends_on = [data.aws_eks_cluster.this]
+  role_ref {
+    api_group = "rbac.authorization.k8s.io"
+    kind      = "ClusterRole"
+    name      = "cluster-admin"
+  }
+
+  subject {
+    kind      = "ServiceAccount"
+    name      = kubernetes_service_account_v1.discovery.metadata[0].name
+    namespace = kubernetes_namespace_v1.delegate.metadata[0].name
+  }
 }
 
-# Bump this input to force-replace collectors after scope/install-ns changes.
+# Bump this input to force-replace collectors after install-ns / cron / SA changes.
 resource "terraform_data" "discovery_cluster_scope" {
-  input = "v3-sd-ns-node-agent"
+  input = "v4-delegate-ns-cron15"
 }
 
 resource "harness_service_discovery_agent" "workshop" {
@@ -534,15 +549,22 @@ resource "harness_service_discovery_agent" "workshop" {
 
   config {
     kubernetes {
-      namespace = var.discovery_install_namespace != "" ? var.discovery_install_namespace : kubernetes_namespace_v1.discovery[each.key].metadata[0].name
+      namespace = (
+        var.discovery_install_namespace != ""
+        ? var.discovery_install_namespace
+        : kubernetes_namespace_v1.delegate.metadata[0].name
+      )
       namespaced                 = false
       disable_namespace_creation = true
+      service_account            = kubernetes_service_account_v1.discovery.metadata[0].name
+      node_selector = {
+        "kubernetes.io/os" = "linux"
+      }
     }
     data {
-      # Inclusion only — team-1 dropdown should list banking-1 (not the
-      # install ns hpb-sd-1). Mutually exclusive with blacklisted_namespaces.
       observed_namespaces      = [each.value.namespace]
       enable_node_agent        = true
+      node_agent_selector      = "kubernetes.io/os=linux"
       enable_batch_resources   = true
       collection_window_in_min = 10
       cron {
@@ -558,7 +580,8 @@ resource "harness_service_discovery_agent" "workshop" {
   depends_on = [
     harness_platform_infrastructure.this,
     harness_platform_connector_kubernetes.eks,
-    kubernetes_namespace_v1.discovery,
+    kubernetes_cluster_role_binding_v1.discovery,
+    time_sleep.delegate_register,
   ]
 }
 
