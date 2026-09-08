@@ -625,7 +625,26 @@ resource "terraform_data" "discovery_agent_binding" {
   ])
 }
 
-resource "harness_service_discovery_agent" "workshop" {
+# destroy = false is essential: the objects are already gone server-side, so a
+# real destroy would 404 and fail the plan exactly like the refresh does. This
+# only drops the dead instances from state. Delete this block once one apply has
+# gone green — leaving it in place would make every later apply forget the
+# agents it just created.
+removed {
+  from = harness_service_discovery_agent.workshop
+
+  lifecycle {
+    destroy = false
+  }
+}
+
+# Destroying harness_chaos_infrastructure_v2 also deleted the agent records
+# behind it — they share the infra_id keyspace in the chaos service — and the
+# provider answers a refresh of a deleted agent with a bare "Not Found" instead
+# of dropping it from state, which makes even a plan impossible. The stale
+# instances are forgotten by the removed block below; this new address builds
+# the agents fresh.
+resource "harness_service_discovery_agent" "agent" {
   for_each = local.projects
 
   name                   = "${local.discovery_name_prefix}-${each.value.name}"
@@ -686,7 +705,7 @@ resource "harness_service_discovery_agent" "workshop" {
 output "discovery_installation" {
   description = "Per-project discovery install status. delegate_task_status is the field that explains an empty Discovery History."
   value = {
-    for k, a in harness_service_discovery_agent.workshop : k => {
+    for k, a in harness_service_discovery_agent.agent : k => {
       name          = a.name
       identity      = a.identity
       service_count = a.service_count
@@ -722,7 +741,7 @@ resource "harness_chaos_infrastructure_v2" "this" {
   infra_type         = var.chaos_infra_type
   infra_scope        = var.chaos_infra_scope
   ai_enabled         = var.ai_enabled
-  discovery_agent_id = coalesce(harness_service_discovery_agent.workshop[each.key].identity, harness_service_discovery_agent.workshop[each.key].id)
+  discovery_agent_id = coalesce(harness_service_discovery_agent.agent[each.key].identity, harness_service_discovery_agent.agent[each.key].id)
   service_account    = var.chaos_service_account
 
   resources {
@@ -736,7 +755,7 @@ resource "harness_chaos_infrastructure_v2" "this" {
     }
   }
 
-  depends_on = [harness_service_discovery_agent.workshop]
+  depends_on = [harness_service_discovery_agent.agent]
 }
 
 resource "null_resource" "install_chaos" {
@@ -867,7 +886,7 @@ output "prometheus_connector_refs" {
 
 output "discovery_agents" {
   value = {
-    for ns, agent in harness_service_discovery_agent.workshop : ns => {
+    for ns, agent in harness_service_discovery_agent.agent : ns => {
       name     = agent.name
       id       = agent.id
       identity = agent.identity
