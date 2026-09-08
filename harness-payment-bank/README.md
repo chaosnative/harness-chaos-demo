@@ -29,7 +29,7 @@ Kubernetes names and Harness names are **different on purpose**. PnC uses `team1
 | PnC (reference only) | Workshop (what we create) | Kubernetes on hpb-eks |
 | --- | --- | --- |
 | org `PnC` / project `team1` | org `workshop` / project `team_1` (name `team-1`) | namespace `banking-1` |
-| env `workshop` / agent **DA-banking-1** (id `banking1`), dropdown ns **workspace** | env `hpb` / agent **hpb-discovery-team-1**, Inclusion **banking-1** | namespace `banking-1` |
+| env `workshop` / agent **DA-banking-1** (id `banking1`), Namespace dropdown **banking-1** | env `hpb` / agent **hpb-discovery-team-1**, Inclusion **banking-1** | namespace `banking-1` |
 | org `PnC` / project `team2` | project `team_2` | namespace `banking-2` |
 
 ## PAT — which account?
@@ -265,7 +265,7 @@ PnC (`orgs/PnC/projects/team1/settings/discovery/banking1`) is the **layout refe
 
 `https://app.harness.io/ng/account/cTU1lRSWS2SSRV9phKvuOA/module/chaos/orgs/workshop/projects/team_1/settings/discovery`
 
-Open agent **`hpb-discovery-team-1`**. PnC’s is **`DA-banking-1`** (dropdown ns **workspace**). Do not name the workshop agent `banking-1`. Delete leftover agents named `banking-1`, `hpb_k8s`, and `custom-discovery-agent`.
+Open agent **`hpb-discovery-team-1`**. PnC’s is **`DA-banking-1`**; its Namespace dropdown lists **`banking-1`**. Do not name the workshop agent `banking-1`. Delete leftover agents named `banking-1`, `hpb_k8s`, and `custom-discovery-agent`.
 
 1. UI: **Organizations → workshop → project team-1** (id `team_1`), not PnC / `team1`.
 2. Confirm env `hpb`, infra **`hpbk8s`**, discovery **`hpb-discovery-team-1`**, chaos `hpb-chaos-team-1`.
@@ -337,7 +337,7 @@ Fix in Git, push `automate_workshop`, retry **stage 2**. Do not destroy EKS.
 | Refresh `Not Found` on discovery | Agent gone in Harness but still in state. Harness runs **`terraform refresh`** separately | `removed { destroy = false }` on old address; skip refresh **only for that apply**. `TF_CLI_ARGS_apply` does not skip it |
 | Plan destroys `harness_platform_organization.this[0]` | `TF_VAR_create_organization=false` while org is in state | Keep `create_organization=true`. `prevent_destroy` on the org |
 | `bash: null: command not found` in `install_chaos` | `install_command` is null; script retried 8×20s | Default `apply_chaos_install_command=false`; treat `null` as skip |
-| Discovery Connected, empty Namespace dropdown | Agent named after the app ns (`banking-1`); collectors installed **in** `banking-1`; node agent off. PnC agent is **DA-banking-1**, dropdown ns is **workspace** | Name `hpb-discovery-team-N`. Install in dedicated `hpb-sd-N`. Inclusion `banking-N`. `enable_node_agent = true`. Re-apply stage 2. |
+| Discovery Connected, empty Namespace dropdown | Agent named after the app ns (`banking-1`); collectors installed **in** `banking-1`; node agent off. PnC agent is **DA-banking-1**; dropdown lists K8s ns **banking-1** | Name `hpb-discovery-team-N`. Install in dedicated `hpb-sd-N`. Inclusion `banking-N`. `enable_node_agent = true`. Re-apply stage 2. |
 
 ## If something already existed (rename)
 

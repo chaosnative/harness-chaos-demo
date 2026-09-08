@@ -306,7 +306,7 @@ variable "infra_name" {
 # --- Discovery / chaos ---
 
 variable "discovery_agent_name_prefix" {
-  description = "Name becomes <prefix>-<project name> (hpb-discovery-team-1). Empty = <resource_prefix>-discovery. Do not name the agent after the K8s namespace; PnC uses DA-banking-1 while the dropdown ns is workspace."
+  description = "Name becomes <prefix>-<project name> (hpb-discovery-team-1). Empty = <resource_prefix>-discovery. Do not name the agent after the K8s namespace; PnC uses DA-banking-1 while the Namespace dropdown lists banking-1."
   type        = string
   default     = ""
 }

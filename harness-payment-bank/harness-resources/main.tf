@@ -495,9 +495,9 @@ removed {
   lifecycle { destroy = false }
 }
 
-# Dedicated install ns per team (hpb-sd-1, …). Docs: agent Namespace is where
-# Harness runs collectors — not the app ns. PnC DA-banking-1 discovers
-# workspace in the dropdown; the agent name is not the K8s namespace.
+# Dedicated install ns per team (hpb-sd-1, …). Agent Namespace is where
+# collectors run — not the app ns. PnC agent DA-banking-1; the Namespace
+# dropdown lists K8s ns banking-1 (Inclusion), not the agent name.
 resource "kubernetes_namespace_v1" "discovery" {
   for_each = var.discovery_install_namespace == "" ? local.projects : {}
 
