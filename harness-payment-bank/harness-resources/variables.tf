@@ -377,6 +377,24 @@ variable "create_discovery_service_account" {
   default     = true
 }
 
+variable "discovery_scope_version" {
+  description = "Manual half of the collector replacement trigger. Bump it to force a reinstall after changing install namespace, service account or cron. The automatic half is the live collector probe."
+  type        = string
+  default     = "v6-reinstall-after-delegate-endpoint-fix"
+}
+
+variable "discovery_autoheal" {
+  description = "true = a plan that finds collectors missing recreates the agents to re-issue the delegate install task. Set false during a live workshop so attendee application maps are never orphaned by an unexpected agent replacement."
+  type        = bool
+  default     = true
+}
+
+variable "verify_discovery_collector" {
+  description = "true = after creating agents, assert a collector CronJob per project exists in the install namespace. Catches the case where the agent record is created but the delegate never ran its install task."
+  type        = bool
+  default     = true
+}
+
 variable "discovery_cron_expression" {
   description = "Collector schedule. UI requires a minute step >= 15. PnC uses 0/15 * * * *. */10 is rejected and Last Discovery stays N/A."
   type        = string
