@@ -495,34 +495,44 @@ removed {
   lifecycle { destroy = false }
 }
 
+# Bump this input to force-replace collectors. Omitting namespaced on an
+# existing agent does not PATCH namespaced=false, so a namespaced install
+# stays Role-only and the UI stays at 0 namespaces / 0 services.
+resource "terraform_data" "discovery_cluster_scope" {
+  input = "v2-cluster-inclusion"
+}
+
 resource "harness_service_discovery_agent" "workshop" {
   for_each = local.projects
 
-  name                   = "${local.discovery_name_prefix}-${each.value.name}"
+  # PnC team1 agent is named banking1. Same mapping here: team-1 → banking-1.
+  name                   = var.discovery_agent_name_prefix != "" ? "${local.discovery_name_prefix}-${each.value.name}" : each.value.namespace
   org_identifier         = local.org_identifier
   project_identifier     = harness_platform_project.this[each.key].identifier
   environment_identifier = harness_platform_environment.this[each.key].identifier
   infra_identifier       = harness_platform_infrastructure.this[each.key].identifier
   installation_type      = var.discovery_installation_type
+  permanent_installation = true
 
   config {
-    # Cluster-scoped collector + Inclusion. namespaced=true only creates a
-    # Role in the install namespace, so the agent cannot list Namespace
-    # objects and the Discovery UI stays empty (0 namespaces / 0 services)
-    # even when banking-N workloads are running. PnC banking1 and the
-    # Harness/ce_demo examples omit namespaced (cluster ClusterRole) and
-    # set observed_namespaces as Inclusion. Isolation is still 1:1:
-    # team-1 sees only banking-1. Do not also set blacklisted_namespaces.
     kubernetes {
-      namespace = var.discovery_install_namespace != "" ? var.discovery_install_namespace : each.value.namespace
+      namespace                  = var.discovery_install_namespace != "" ? var.discovery_install_namespace : each.value.namespace
+      namespaced                 = false
+      disable_namespace_creation = false
     }
     data {
+      # Inclusion only — mutually exclusive with Exclusion (blacklisted_namespaces).
+      # team-1 → banking-1, team-2 → banking-2. Must match the EKS name (hyphen).
       observed_namespaces      = [each.value.namespace]
       collection_window_in_min = 10
       cron {
         expression = var.discovery_cron_expression
       }
     }
+  }
+
+  lifecycle {
+    replace_triggered_by = [terraform_data.discovery_cluster_scope]
   }
 
   depends_on = [

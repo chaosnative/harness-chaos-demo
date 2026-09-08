@@ -306,7 +306,7 @@ variable "infra_name" {
 # --- Discovery / chaos ---
 
 variable "discovery_agent_name_prefix" {
-  description = "Name becomes <prefix>-<project name> (hpb-discovery-team-1). Empty = <resource_prefix>-discovery"
+  description = "Empty = name the agent after the Kubernetes namespace (banking-1), same pattern as PnC banking1. Set to override as <prefix>-<project name> (hpb-discovery-team-1)."
   type        = string
   default     = ""
 }
