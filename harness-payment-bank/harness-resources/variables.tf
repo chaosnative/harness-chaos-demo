@@ -31,10 +31,21 @@ variable "harness_gateway_endpoint" {
   default     = "https://app.harness.io/gateway"
 }
 
+# Cluster-specific, and NOT the same value as harness_gateway_endpoint — the NG
+# gateway routes by account id in the path so it works from any cluster, while
+# the delegate hits the legacy manager API which does not. app.harness.io is
+# correct for this account (its UI is served from there), so leave it alone.
+# Only change it if the delegate install command in Account Settings ->
+# Delegates shows a different managerEndpoint / MANAGER_HOST_AND_PORT.
 variable "manager_endpoint" {
-  description = "Delegate manager URL. Copy from Account Settings → Overview if the default is wrong."
+  description = "Delegate manager URL for THIS account's Harness cluster. Verify against the managerEndpoint in the delegate install command under Account Settings → Delegates."
   type        = string
   default     = "https://app.harness.io"
+
+  validation {
+    condition     = can(regex("^https://", var.manager_endpoint)) && !can(regex("/gateway/?$", var.manager_endpoint))
+    error_message = "manager_endpoint must be an https:// URL and must not end in /gateway — that is harness_gateway_endpoint, a different value."
+  }
 }
 
 # --- Shared naming ---
@@ -149,7 +160,7 @@ variable "project_overrides" {
 variable "delegate_name" {
   description = "Delegate name and selector. Empty = <resource_prefix>-workshop-delegate"
   type        = string
-  default     = ""
+  default     = "hpb-workshop-delegate"
 }
 
 variable "delegate_namespace" {
@@ -166,6 +177,18 @@ variable "delegate_token_name" {
 variable "delegate_replicas" {
   type    = number
   default = 1
+}
+
+# Escape hatch only. Keep true for a pipeline-driven workshop: Terraform must
+# own the delegate for the setup to be reproducible across all N teams.
+# WARNING: flipping this to false while helm_release.delegate is already in
+# state makes Terraform plan a destroy, i.e. helm uninstall on a live delegate.
+# It requires `terraform state rm helm_release.delegate` first, which a
+# TerraformApply step cannot do — so only use false for local runs.
+variable "manage_delegate" {
+  description = "true = Terraform installs and owns the delegate Helm release (required for pipeline-driven runs). false = reuse a delegate installed outside Terraform and only check readiness; needs a manual state rm first."
+  type        = bool
+  default     = true
 }
 
 variable "decode_delegate_token" {
@@ -311,10 +334,13 @@ variable "discovery_agent_name_prefix" {
   default     = ""
 }
 
+# Kept only so an existing TF_VAR_discovery_installation_type on the pipeline
+# step does not warn about an undeclared variable. It is no longer wired to the
+# agent: the provider never sends installation_type on create/update.
 variable "discovery_installation_type" {
-  description = "CONNECTOR installs via the project's Kubernetes connector / delegate"
+  description = "Unused. The Terraform provider ignores installation_type on write; the agent installs via the project's Kubernetes connector regardless."
   type        = string
-  default     = "CONNECTOR"
+  default     = ""
 }
 
 variable "discovery_install_namespace" {
@@ -330,7 +356,7 @@ variable "discovery_service_account" {
 }
 
 variable "create_discovery_service_account" {
-  description = "true = Terraform creates the service account + cluster-admin binding in the delegate namespace. Set false if chaos-delegate already exists on hpb-eks (apply fails with already exists)."
+  description = "true = ensure the service account + cluster-admin binding exist in the delegate namespace via create-or-adopt (kubectl apply), which is safe when PnC already created chaos-delegate on the shared hpb-eks. Set false only if you manage that RBAC elsewhere."
   type        = bool
   default     = true
 }

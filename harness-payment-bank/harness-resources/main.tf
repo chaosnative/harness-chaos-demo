@@ -224,13 +224,20 @@ resource "harness_platform_project" "this" {
 }
 
 # -----------------------------------------------------------------------------
-# Delegate (org token + Helm on the EKS cluster)
+# Delegate (account-scoped token + Helm on the EKS cluster)
 # -----------------------------------------------------------------------------
 
+# ACCOUNT-scoped deliberately: no org_id. The delegate that actually registers
+# was installed from account-level settings
+# (/account/<acct>/module/chaos/settings/delegates/list — note there is no
+# /orgs/<org>/ segment), so its token is account-scoped. An org_id here made
+# this token org-scoped while the Helm chart still registered at account level
+# with accountId only, and every call came back 401 ACCOUNT_DOES_NOT_EXIST.
+# Removing org_id replaces the token, which is intended: the new value flows
+# into helm_release.delegate and the delegate re-registers.
 resource "harness_platform_delegatetoken" "this" {
   name       = local.delegate_token_name
   account_id = var.account_id
-  org_id     = local.org_identifier
 }
 
 resource "kubernetes_namespace_v1" "delegate" {
@@ -244,7 +251,14 @@ resource "kubernetes_namespace_v1" "delegate" {
   }
 }
 
+# Set manage_delegate = false when the delegate was installed by hand from the
+# Harness UI. Terraform would otherwise re-assert its own managerEndpoint,
+# accountId and token on every apply and push a working delegate straight back
+# into ACCOUNT_DOES_NOT_EXIST. delegate_ready still verifies it is Ready either
+# way, so the rest of the graph keeps its ordering guarantee.
 resource "helm_release" "delegate" {
+  count = var.manage_delegate ? 1 : 0
+
   name       = local.delegate_name
   namespace  = kubernetes_namespace_v1.delegate.metadata[0].name
   repository = "https://app.harness.io/storage/harness-download/delegate-helm-chart/"
@@ -312,7 +326,7 @@ resource "helm_release" "delegate" {
 
 resource "null_resource" "delegate_ready" {
   triggers = {
-    release = helm_release.delegate.id
+    release = var.manage_delegate ? helm_release.delegate[0].id : "externally-installed"
     retries = tostring(var.apply_retries)
     delay   = tostring(var.apply_retry_interval)
   }
@@ -335,18 +349,28 @@ resource "null_resource" "delegate_ready" {
       while [ "$i" -le "$RETRIES" ]; do
         echo "delegate ready attempt $i/$RETRIES"
         if kubectl get ns "$NS" >/dev/null 2>&1; then
+          # Only condition=Ready is trusted. A previous fallback grepped for
+          # 'Running|1/1', which matches the literal "0/1   Running" of a
+          # crash-looping delegate — so this gate went green over a delegate
+          # with 200+ restarts, and every downstream delegate task (including
+          # the discovery collector install) silently never ran.
           if kubectl wait --for=condition=Ready pod -n "$NS" -l app.kubernetes.io/instance="$NAME" --timeout=45s 2>/dev/null; then
             echo "Delegate pods Ready"
-            exit 0
-          fi
-          if kubectl get pods -n "$NS" -l app.kubernetes.io/instance="$NAME" --no-headers 2>/dev/null | grep -qiE 'Running|1/1'; then
-            echo "Delegate pods Running"
             exit 0
           fi
         fi
         if [ "$i" -eq "$RETRIES" ]; then
           echo "Delegate not Ready after $RETRIES attempts on $CLUSTER; re-run terraform apply (do not destroy)"
-          kubectl get pods -n "$NS" -l app.kubernetes.io/instance="$NAME" || true
+          kubectl get pods -n "$NS" -l app.kubernetes.io/instance="$NAME" -o wide || true
+          echo "--- restart count / last termination ---"
+          kubectl get pods -n "$NS" -l app.kubernetes.io/instance="$NAME" \
+            -o 'jsonpath={range .items[*]}{.metadata.name}{"  restarts="}{.status.containerStatuses[0].restartCount}{"  lastState="}{.status.containerStatuses[0].lastState}{"\n"}{end}' || true
+          echo "--- probe failures ---"
+          kubectl describe pod -n "$NS" -l app.kubernetes.io/instance="$NAME" 2>/dev/null | grep -iE 'probe|unhealthy|oomkill|killing|backoff' || true
+          echo "--- delegate logs (previous container) ---"
+          kubectl logs -n "$NS" -l app.kubernetes.io/instance="$NAME" --tail=80 --previous 2>/dev/null || true
+          echo "--- delegate logs (current container) ---"
+          kubectl logs -n "$NS" -l app.kubernetes.io/instance="$NAME" --tail=80 2>/dev/null || true
           exit 1
         fi
         sleep "$DELAY"
@@ -514,7 +538,8 @@ resource "kubernetes_service_account_v1" "discovery" {
   }
 }
 
-# Cluster-wide read so the agent can list Namespace objects for Inclusion.
+# Cluster-wide read so the collector can list Namespace objects, which is what
+# populates the Namespace dropdown when scoping with Inclusion.
 resource "kubernetes_cluster_role_binding_v1" "discovery" {
   count = var.create_discovery_service_account ? 1 : 0
 
@@ -552,7 +577,12 @@ resource "harness_service_discovery_agent" "workshop" {
   project_identifier     = harness_platform_project.this[each.key].identifier
   environment_identifier = harness_platform_environment.this[each.key].identifier
   infra_identifier       = harness_platform_infrastructure.this[each.key].identifier
-  installation_type      = var.discovery_installation_type
+
+  # installation_type is deliberately not set. The provider never sends it on
+  # create/update (resource_agent.go only does d.Set from the API response), so
+  # setting it does nothing except invite permanent drift when the API reports a
+  # different value than the one in config. Ours said "CONNECTOR"; the provider
+  # vocabulary is Connector / Helm / Manifest / Yaml, so it never matched.
 
   config {
     kubernetes {
@@ -591,6 +621,35 @@ resource "harness_service_discovery_agent" "workshop" {
     kubernetes_cluster_role_binding_v1.discovery,
     time_sleep.delegate_register,
   ]
+}
+
+# installation_details is computed by the provider from the API, so a green
+# apply already knows why the collector never ran — it just never printed it.
+# delegate_task_status is the answer: if there is no install task, or it failed,
+# Discovery History stays completely empty and Last Discovery stays N/A no
+# matter how correct the agent config is. Read these in the stage-2 apply log.
+output "discovery_installation" {
+  description = "Per-project discovery install status. delegate_task_status is the field that explains an empty Discovery History."
+  value = {
+    for k, a in harness_service_discovery_agent.workshop : k => {
+      name          = a.name
+      identity      = a.identity
+      service_count = a.service_count
+      removed       = a.removed
+      install = [
+        for d in a.installation_details : {
+          delegate_id          = d.delegate_id
+          delegate_task_id     = d.delegate_task_id
+          delegate_task_status = d.delegate_task_status
+          is_cron_triggered    = d.is_cron_triggered
+          stopped              = d.stopped
+          removed              = d.removed
+          log_stream_id        = d.log_stream_id
+          agent_details        = d.agent_details
+        }
+      ]
+    }
+  }
 }
 
 resource "harness_chaos_infrastructure_v2" "this" {
