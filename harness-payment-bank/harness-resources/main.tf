@@ -495,9 +495,14 @@ removed {
   lifecycle { destroy = false }
 }
 
-# PnC DA-banking-1: install ns harness-delegate-ng, SA chaos-delegate, cron 0/15.
-# Inclusion banking-1 is the Namespace dropdown. Do not install in hpb-sd-N.
+# PnC DA-banking-1: install ns harness-delegate-ng, SA chaos-delegate,
+# cron 0/15, Inclusion banking-1, network trace OFF, static configmap name OFF.
+# Docs (single namespace + Inclusion): "Disable the Detect network trace
+# connectivity." Leaving it on makes the form demand a node selector and the
+# collector never runs (Last Discovery: N/A).
 resource "kubernetes_service_account_v1" "discovery" {
+  count = var.create_discovery_service_account ? 1 : 0
+
   metadata {
     name      = var.discovery_service_account
     namespace = kubernetes_namespace_v1.delegate.metadata[0].name
@@ -509,7 +514,10 @@ resource "kubernetes_service_account_v1" "discovery" {
   }
 }
 
+# Cluster-wide read so the agent can list Namespace objects for Inclusion.
 resource "kubernetes_cluster_role_binding_v1" "discovery" {
+  count = var.create_discovery_service_account ? 1 : 0
+
   metadata {
     name = "${var.discovery_service_account}-cluster-admin"
     labels = {
@@ -526,14 +534,14 @@ resource "kubernetes_cluster_role_binding_v1" "discovery" {
 
   subject {
     kind      = "ServiceAccount"
-    name      = kubernetes_service_account_v1.discovery.metadata[0].name
+    name      = kubernetes_service_account_v1.discovery[0].metadata[0].name
     namespace = kubernetes_namespace_v1.delegate.metadata[0].name
   }
 }
 
 # Bump this input to force-replace collectors after install-ns / cron / SA changes.
 resource "terraform_data" "discovery_cluster_scope" {
-  input = "v4-delegate-ns-cron15"
+  input = "v5-pnc-parity-no-node-agent"
 }
 
 resource "harness_service_discovery_agent" "workshop" {
@@ -545,7 +553,6 @@ resource "harness_service_discovery_agent" "workshop" {
   environment_identifier = harness_platform_environment.this[each.key].identifier
   infra_identifier       = harness_platform_infrastructure.this[each.key].identifier
   installation_type      = var.discovery_installation_type
-  permanent_installation = true
 
   config {
     kubernetes {
@@ -556,17 +563,18 @@ resource "harness_service_discovery_agent" "workshop" {
       )
       namespaced                 = false
       disable_namespace_creation = true
-      service_account            = kubernetes_service_account_v1.discovery.metadata[0].name
-      node_selector = {
-        "kubernetes.io/os" = "linux"
-      }
+      service_account            = var.discovery_service_account
     }
     data {
-      observed_namespaces      = [each.value.namespace]
-      enable_node_agent        = true
-      node_agent_selector      = "kubernetes.io/os=linux"
-      enable_batch_resources   = true
-      collection_window_in_min = 10
+      # Inclusion only. This list is the UI Namespace dropdown: team-1 → banking-1.
+      observed_namespaces = [each.value.namespace]
+
+      # Network trace needs a node agent + node selector + duration. PnC leaves
+      # it off, so these stay null unless discovery_enable_network_trace is set.
+      enable_node_agent        = var.discovery_enable_network_trace
+      node_agent_selector      = var.discovery_enable_network_trace ? var.discovery_node_agent_selector : null
+      collection_window_in_min = var.discovery_enable_network_trace ? var.discovery_collection_window_in_min : null
+
       cron {
         expression = var.discovery_cron_expression
       }

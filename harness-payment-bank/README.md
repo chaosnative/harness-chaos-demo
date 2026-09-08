@@ -59,7 +59,7 @@ Rules:
 | K8s connector (per project) | `hpb_eks` | Underscore OK (Harness ID, not a Helm release name) |
 | Environment | `hpb` | |
 | CD / chaos infra id | **`hpbk8s`** | Letters+digits only. Display name `hpb-k8s`. Never `hpb_k8s` or `hpb-k8s` as the identifier |
-| Discovery in Terraform | `harness_service_discovery_agent.workshop` | Name `hpb-discovery-team-N`. Install in `harness-delegate-ng`, SA `chaos-delegate`, cron `0/15 * * * *`. Inclusion `banking-N`. Force-replace via `terraform_data.discovery_cluster_scope`. |
+| Discovery in Terraform | `harness_service_discovery_agent.workshop` | Name `hpb-discovery-team-N`. Install in `harness-delegate-ng`, SA `chaos-delegate`, cron `0/15 * * * *`, Inclusion `banking-N`, **network trace off**. Force-replace via `terraform_data.discovery_cluster_scope`. |
 | Chaos infra | `hpb-chaos-team-N` | Helm event-watcher name is `event-watcher-hpbk8s` |
 | S3 (workshop TF) | bucket `hpb-demo-tfstate-naren`, key `hpb-harness/terraform.tfstate` | Lock table `hpb-demo-tf-lock` |
 | Git branch for `harness-resources/` | `automate_workshop` | Stage 1 EKS may still use `main` |
@@ -269,7 +269,17 @@ Open agent **`hpb-discovery-team-1`**. PnC’s is **`DA-banking-1`**; its Namesp
 
 1. UI: **Organizations → workshop → project team-1** (id `team_1`), not PnC / `team1`.
 2. Confirm env `hpb`, infra **`hpbk8s`**, discovery **`hpb-discovery-team-1`**, chaos `hpb-chaos-team-1`.
-3. Settings must match PnC except env/infra ids: install ns **`harness-delegate-ng`**, SA **`chaos-delegate`**, cron **`0/15 * * * *`**, Inclusion **`banking-1`**. First collection can take ~15 minutes (not 10). Then the Namespace dropdown lists `banking-1`.
+3. Settings must match PnC except env/infra ids. Every one of these five, not four:
+
+| Field | PnC `DA-banking-1` | Workshop must be |
+|---|---|---|
+| Namespace (install) | `harness-delegate-ng` | `harness-delegate-ng` |
+| Custom cron | `0/15 * * * *` | `0/15 * * * *` (step < 15 is rejected) |
+| Namespace filter | Inclusion `banking-1` | Inclusion `banking-N` |
+| Detect network trace connectivity | **off** | **off** |
+| Use this Service Account | `chaos-delegate` | `chaos-delegate` |
+
+   Network trace is the one that is easy to miss: turning it on adds *For a duration of (in mins)* plus a required node selector, and the form refuses to submit with **"Please add node selector"**, so the collector never schedules. The docs say to disable it whenever you scope with Inclusion. First collection can take ~15 minutes (not 10). Then the Namespace dropdown lists `banking-1`.
 4. On **hpb-eks** (not the pipeline delegate’s cluster):
 
 ```bash
@@ -330,14 +340,16 @@ Fix in Git, push `automate_workshop`, retry **stage 2**. Do not destroy EKS.
 | Delegate ready dumps `qa-private-upgrader`, `vanilla-delegate` CrashLoop | `kubectl` used the **pipeline** cluster | `aws eks update-kubeconfig` for `hpb-eks`; label-scoped pod list |
 | Helm `context deadline exceeded` | `wait = true` on a slow delegate | `wait = false`; poller; timeout 1200s |
 | `gocron: .Every() interval must be greater than 0` | Discovery cron expression omitted | Default `0/15 * * * *` |
-| `collection window should be between 1 <-> 10` | Provider docs use 15; this API max is 10 | `collection_window_in_min = 10` (cron is still 15 min) |
+| `collection window should be between 1 <-> 10` | Provider docs use 15; this API max is 10 | `discovery_collection_window_in_min = 10`, and it is only sent when network trace is on |
 | `event-watcher-hpb_k8s` invalid Helm name | Underscore in CD infra id | Identifier **`hpbk8s`** |
 | `infrastructureDefinition.identifier` regex fail | Hyphen in CD infra id (`hpb-k8s`) | Same **`hpbk8s`** |
 | `cannot update immutable fields: … infra_identifier` | Discovery already bound to `hpb_k8s` | Resource address `workshop`; do not PATCH |
 | Refresh `Not Found` on discovery | Agent gone in Harness but still in state. Harness runs **`terraform refresh`** separately | `removed { destroy = false }` on old address; skip refresh **only for that apply**. `TF_CLI_ARGS_apply` does not skip it |
 | Plan destroys `harness_platform_organization.this[0]` | `TF_VAR_create_organization=false` while org is in state | Keep `create_organization=true`. `prevent_destroy` on the org |
 | `bash: null: command not found` in `install_chaos` | `install_command` is null; script retried 8×20s | Default `apply_chaos_install_command=false`; treat `null` as skip |
-| Discovery Connected, Last Discovery N/A, empty dropdown | Cron `*/10` (UI min 15), install ns `hpb-sd-1`, empty SA, missing node selector. PnC: `harness-delegate-ng` + `chaos-delegate` + `0/15 * * * *` + Inclusion `banking-1` | Match those four. Keep env `hpb` / infra `hpbk8s`. Re-apply stage 2. |
+| Discovery Connected, Last Discovery N/A, empty dropdown | Cron `*/10` (UI min 15), install ns `hpb-sd-1`, empty SA | Install ns `harness-delegate-ng`, SA `chaos-delegate`, cron `0/15 * * * *`, Inclusion `banking-N`. Keep env `hpb` / infra `hpbk8s`. Re-apply stage 2 |
+| Still N/A after matching install ns / SA / cron | `enable_node_agent = true` → form wants a node selector and blocks on **"Please add node selector"**. PnC has network trace off | `discovery_enable_network_trace = false` (default). Node selector and collection window go `null` with it |
+| `Update Discovery Agent` button instead of `Edit` | Agent record exists but the collector was never installed with a valid config | Fix the config, bump `terraform_data.discovery_cluster_scope`, re-apply so the agent is replaced |
 
 ## If something already existed (rename)
 
@@ -358,7 +370,7 @@ Do not destroy `infrastructure/` just to rename teams.
 - `create_organization` + org `prevent_destroy`. Data lookup only when org is **not** in state.
 - Delegate Helm: `wait=false`, `upgrade_install`, `take_ownership`, upgrader off; ready poll uses **hpb-eks** kubeconfig.
 - Infra identifier **`hpbk8s`**; validation rejects `_` and `-`.
-- Discovery: name `hpb-discovery-team-N`; install `harness-delegate-ng` + SA `chaos-delegate`; cron `0/15`; Inclusion `banking-N`.
+- Discovery: name `hpb-discovery-team-N`; install `harness-delegate-ng` + SA `chaos-delegate`; cron `0/15`; Inclusion `banking-N`; network trace off.
 - Chaos v2 on `hpbk8s`; `apply_chaos_install_command` default false.
 - Optional experiment import from a **this-account** hub only.
 

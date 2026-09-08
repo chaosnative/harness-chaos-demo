@@ -324,15 +324,49 @@ variable "discovery_install_namespace" {
 }
 
 variable "discovery_service_account" {
-  description = "Service account in the install namespace. PnC uses chaos-delegate. Created in harness-delegate-ng with cluster-admin."
+  description = "Service account in the install namespace. PnC uses chaos-delegate. Must exist before the agent installs, or the collector never starts."
   type        = string
   default     = "chaos-delegate"
 }
 
+variable "create_discovery_service_account" {
+  description = "true = Terraform creates the service account + cluster-admin binding in the delegate namespace. Set false if chaos-delegate already exists on hpb-eks (apply fails with already exists)."
+  type        = bool
+  default     = true
+}
+
 variable "discovery_cron_expression" {
-  description = "Collector schedule. UI requires minutes >= 15. PnC uses 0/15 * * * *. */10 is rejected and Last Discovery stays N/A."
+  description = "Collector schedule. UI requires a minute step >= 15. PnC uses 0/15 * * * *. */10 is rejected and Last Discovery stays N/A."
   type        = string
   default     = "0/15 * * * *"
+
+  validation {
+    condition     = !can(regex("^[0*]/([0-9]|1[0-4]) ", var.discovery_cron_expression))
+    error_message = "discovery_cron_expression minute step must be 15 or more (e.g. 0/15 * * * *). The Discovery form rejects anything smaller."
+  }
+}
+
+variable "discovery_enable_network_trace" {
+  description = "Detect network trace connectivity (node agent). PnC leaves this OFF for single-namespace Inclusion; on, the form also demands a node selector and duration. Only enable if you need connection maps."
+  type        = bool
+  default     = false
+}
+
+variable "discovery_node_agent_selector" {
+  description = "Node selector for the network-trace node agent. Used only when discovery_enable_network_trace is true."
+  type        = string
+  default     = "kubernetes.io/os=linux"
+}
+
+variable "discovery_collection_window_in_min" {
+  description = "Network-trace collection window. Used only when discovery_enable_network_trace is true. API max is 10."
+  type        = number
+  default     = 10
+
+  validation {
+    condition     = var.discovery_collection_window_in_min >= 1 && var.discovery_collection_window_in_min <= 10
+    error_message = "discovery_collection_window_in_min must be between 1 and 10."
+  }
 }
 
 variable "import_discovery_namespaces" {
