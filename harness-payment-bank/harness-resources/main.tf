@@ -506,14 +506,17 @@ resource "harness_service_discovery_agent" "workshop" {
   installation_type      = var.discovery_installation_type
 
   config {
+    # Cluster-scoped collector + Inclusion. namespaced=true only creates a
+    # Role in the install namespace, so the agent cannot list Namespace
+    # objects and the Discovery UI stays empty (0 namespaces / 0 services)
+    # even when banking-N workloads are running. PnC banking1 and the
+    # Harness/ce_demo examples omit namespaced (cluster ClusterRole) and
+    # set observed_namespaces as Inclusion. Isolation is still 1:1:
+    # team-1 sees only banking-1. Do not also set blacklisted_namespaces.
     kubernetes {
-      namespace                  = var.discovery_install_namespace != "" ? var.discovery_install_namespace : each.value.namespace
-      namespaced                 = true
-      disable_namespace_creation = true
+      namespace = var.discovery_install_namespace != "" ? var.discovery_install_namespace : each.value.namespace
     }
     data {
-      # Inclusion only — mutually exclusive with Exclusion (blacklisted_namespaces).
-      # team-1 → banking-1, team-2 → banking-2, … one namespace per project.
       observed_namespaces      = [each.value.namespace]
       collection_window_in_min = 10
       cron {
@@ -692,6 +695,7 @@ output "discovery_agents" {
       name     = agent.name
       id       = agent.id
       identity = agent.identity
+      ui_url   = "https://app.harness.io/ng/account/${var.account_id}/module/chaos/orgs/${local.org_identifier}/projects/${harness_platform_project.this[ns].identifier}/settings/discovery/${coalesce(agent.identity, agent.id)}?environmentIdentifier=${local.environment_id}"
     }
   }
 }

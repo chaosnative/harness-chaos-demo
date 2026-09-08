@@ -318,7 +318,7 @@ variable "discovery_installation_type" {
 }
 
 variable "discovery_install_namespace" {
-  description = "Namespace for the discovery agent pods. Empty = the project's app namespace."
+  description = "Namespace where collector pods are installed. Empty = the project's app namespace (banking-N). Agent stays cluster-scoped; Inclusion (observed_namespaces) is still that one namespace. Do not set namespaced=true — the UI cannot list namespaces without a ClusterRole."
   type        = string
   default     = ""
 }

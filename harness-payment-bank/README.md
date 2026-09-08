@@ -61,7 +61,7 @@ Rules:
 | K8s connector (per project) | `hpb_eks` | Underscore OK (Harness ID, not a Helm release name) |
 | Environment | `hpb` | |
 | CD / chaos infra id | **`hpbk8s`** | Letters+digits only. Display name `hpb-k8s`. Never `hpb_k8s` or `hpb-k8s` as the identifier |
-| Discovery in Terraform | `harness_service_discovery_agent.workshop` | Inclusion = mapped ns only (`team_1` → `banking-1`). Old address `.this` is `removed` |
+| Discovery in Terraform | `harness_service_discovery_agent.workshop` | Cluster-scoped + Inclusion = mapped ns only (`team_1` → `banking-1`). Never `namespaced=true` (UI cannot list namespaces). Old address `.this` is `removed` |
 | Chaos infra | `hpb-chaos-team-N` | Helm event-watcher name is `event-watcher-hpbk8s` |
 | S3 (workshop TF) | bucket `hpb-demo-tfstate-naren`, key `hpb-harness/terraform.tfstate` | Lock table `hpb-demo-tf-lock` |
 | Git branch for `harness-resources/` | `automate_workshop` | Stage 1 EKS may still use `main` |
@@ -86,7 +86,7 @@ Harness account  <── PAT belongs here (cTU1l…)
 ```
 
 **Org (shared):** delegate, optional AWS connector. **No** Connector templates (NG has no that type).  
-**Each project (isolated):** K8s connector, Prometheus, env, infra `hpbk8s`, discovery (Inclusion = that project's namespace only, e.g. team-1 → `banking-1`), chaos, optional experiment import.
+**Each project (isolated):** K8s connector, Prometheus, env, infra `hpbk8s`, discovery (cluster-scoped collector, Inclusion = that project's namespace only, e.g. team-1 → `banking-1`), chaos, optional experiment import.
 
 `harness-resources/` apply order: remote state (EKS + `banking-N`) → org → projects → delegate Helm on **hpb-eks** → connectors / env / infra → discovery → chaos v2 → experiment import only if both `TF_VAR_experiment_hub_identity` and `TF_VAR_experiment_template_identity` are set (hub in **this** account).
 
@@ -263,12 +263,28 @@ Do not put both Terraform roots in one step. Do not add another Plan → Approve
 
 ### C. After both stages are green
 
-1. UI (workshop account): **Organizations → workshop → project team-1**.
+PnC (`orgs/PnC/projects/team1/settings/discovery/banking1`) is the **layout reference only**. It already has a populated agent. Workshop discovery is a different org/project/agent:
+
+`https://app.harness.io/ng/account/cTU1lRSWS2SSRV9phKvuOA/module/chaos/orgs/workshop/projects/team_1/settings/discovery/hpbk8s?environmentIdentifier=hpb`
+
+Open **that** agent (`hpb-discovery-team-1`, id `hpbk8s`, status SUCCESS). Ignore leftovers `hpb_k8s` and `custom-discovery-agent` (delete those in the UI).
+
+1. UI: **Organizations → workshop → project team-1** (id `team_1`), not PnC / `team1`.
 2. Confirm env `hpb`, infra **`hpbk8s`**, discovery `hpb-discovery-team-1`, chaos `hpb-chaos-team-1`.
-3. On **hpb-eks** (not the pipeline delegate’s cluster): `kubectl get pods -n harness-delegate-ng -l app.kubernetes.io/instance=hpb-workshop-delegate` and `-n banking-1`.
-4. Turn Skip Refresh Command **off** if you had turned it on. Do not leave `TF_VAR_create_organization=false` on the step.
-5. If `TF_VAR_experiment_template_identity` and `TF_VAR_experiment_hub_identity` were set, each `team-N` has the imported experiment. Those identities must belong to a hub **in this account**, not PnC.
-6. Run the experiment in `team-1`. Faults stay in `banking-1`.
+3. On the discovery agent: Inclusion = **`banking-1` only**. After the first cron (`*/10 * * * *`, wait up to 10 minutes, then refresh) the **Namespaces** list should show `banking-1` and **Services** should match `kubectl get svc,deploy -n banking-1` on **hpb-eks**.
+4. On **hpb-eks** (not the pipeline delegate’s cluster):
+
+```bash
+aws eks update-kubeconfig --region us-east-1 --name hpb-eks
+kubectl get pods -n harness-delegate-ng -l app.kubernetes.io/instance=hpb-workshop-delegate
+kubectl get pods,svc,deploy -n banking-1
+# collector / sd-agent pods in banking-1 (cluster-scoped install, Inclusion = banking-1)
+kubectl get pods -n banking-1 | grep -Ei 'sd-|discovery|collector'
+```
+
+5. Turn Skip Refresh Command **off** if you had turned it on. Do not leave `TF_VAR_create_organization=false` on the step.
+6. If `TF_VAR_experiment_template_identity` and `TF_VAR_experiment_hub_identity` were set, each `team-N` has the imported experiment. Those identities must belong to a hub **in this account**, not PnC.
+7. Run the experiment in `team-1`. Faults stay in `banking-1`.
 
 ### D. Tear down
 
@@ -324,6 +340,7 @@ Fix in Git, push `automate_workshop`, retry **stage 2**. Do not destroy EKS.
 | Refresh `Not Found` on discovery | Agent gone in Harness but still in state. Harness runs **`terraform refresh`** separately | `removed { destroy = false }` on old address; skip refresh **only for that apply**. `TF_CLI_ARGS_apply` does not skip it |
 | Plan destroys `harness_platform_organization.this[0]` | `TF_VAR_create_organization=false` while org is in state | Keep `create_organization=true`. `prevent_destroy` on the org |
 | `bash: null: command not found` in `install_chaos` | `install_command` is null; script retried 8×20s | Default `apply_chaos_install_command=false`; treat `null` as skip |
+| Discovery SUCCESS, 0 namespaces / 0 services | Agent was `namespaced=true` (Role only; cannot list Namespace objects). PnC `banking1` is cluster-scoped + Inclusion | Omit `namespaced` / `disable_namespace_creation`; Inclusion `observed_namespaces = [banking-N]`. Re-apply stage 2. Open org **workshop** / project **team_1** / agent **hpbk8s**, not PnC `team1`/`banking1` |
 
 ## If something already existed (rename)
 
@@ -344,7 +361,7 @@ Do not destroy `infrastructure/` just to rename teams.
 - `create_organization` + org `prevent_destroy`. Data lookup only when org is **not** in state.
 - Delegate Helm: `wait=false`, `upgrade_install`, `take_ownership`, upgrader off; ready poll uses **hpb-eks** kubeconfig.
 - Infra identifier **`hpbk8s`**; validation rejects `_` and `-`.
-- Discovery cron + collection window 10; resource address `workshop`; `removed` for stale `.this`.
+- Discovery cron + collection window 10; cluster-scoped + Inclusion `banking-N` (not `namespaced=true`); resource address `workshop`; `removed` for stale `.this`.
 - Chaos v2 on `hpbk8s`; `apply_chaos_install_command` default false.
 - Optional experiment import from a **this-account** hub only.
 
