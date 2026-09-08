@@ -29,7 +29,7 @@ Kubernetes names and Harness names are **different on purpose**. PnC uses `team1
 | PnC (reference only) | Workshop (what we create) | Kubernetes on hpb-eks |
 | --- | --- | --- |
 | org `PnC` / project `team1` | org `workshop` / project `team_1` (name `team-1`) | namespace `banking-1` |
-| env `workshop` / discovery **`banking1`** | env `hpb` / discovery **name `banking-1`**, id `hpbk8s` | same namespace |
+| env `workshop` / agent **DA-banking-1** (id `banking1`), dropdown ns **workspace** | env `hpb` / agent **hpb-discovery-team-1**, Inclusion **banking-1** | namespace `banking-1` |
 | org `PnC` / project `team2` | project `team_2` | namespace `banking-2` |
 
 ## PAT — which account?
@@ -59,7 +59,7 @@ Rules:
 | K8s connector (per project) | `hpb_eks` | Underscore OK (Harness ID, not a Helm release name) |
 | Environment | `hpb` | |
 | CD / chaos infra id | **`hpbk8s`** | Letters+digits only. Display name `hpb-k8s`. Never `hpb_k8s` or `hpb-k8s` as the identifier |
-| Discovery in Terraform | `harness_service_discovery_agent.workshop` | Name = K8s ns (`banking-1`). Cluster-scoped (`namespaced = false`) + Inclusion that ns. Agent id still `hpbk8s` (CD infra id). Force-replaced via `terraform_data.discovery_cluster_scope`. Old address `.this` is `removed` |
+| Discovery in Terraform | `harness_service_discovery_agent.workshop` | Name `hpb-discovery-team-N` (not the K8s ns). Collectors in `hpb-sd-N`. Inclusion = `banking-N`. Node agent on. Force-replace via `terraform_data.discovery_cluster_scope`. Old address `.this` is `removed` |
 | Chaos infra | `hpb-chaos-team-N` | Helm event-watcher name is `event-watcher-hpbk8s` |
 | S3 (workshop TF) | bucket `hpb-demo-tfstate-naren`, key `hpb-harness/terraform.tfstate` | Lock table `hpb-demo-tf-lock` |
 | Git branch for `harness-resources/` | `automate_workshop` | Stage 1 EKS may still use `main` |
@@ -77,7 +77,7 @@ Harness account  <── PAT belongs here (cTU1l…)
         ├── environment       hpb
         ├── infra             hpbk8s             → hpb_eks, namespace banking-1
         ├── prometheus        hpb-prometheus-team-1  → prometheus.banking-1
-        ├── discovery         banking-1          (Inclusion = banking-1; id hpbk8s)
+        ├── discovery         hpb-discovery-team-1  (install hpb-sd-1, Inclusion banking-1)
         ├── chaos infra v2    hpb-chaos-team-1
         └── experiment        import from a **workshop** org/account hub template (TF_VAR_experiment_*)
     └── project team-2 … same pattern, namespace banking-2
@@ -263,21 +263,20 @@ Do not put both Terraform roots in one step. Do not add another Plan → Approve
 
 PnC (`orgs/PnC/projects/team1/settings/discovery/banking1`) is the **layout reference only**. It already has a populated agent. Workshop discovery is a different org/project/agent:
 
-`https://app.harness.io/ng/account/cTU1lRSWS2SSRV9phKvuOA/module/chaos/orgs/workshop/projects/team_1/settings/discovery/hpbk8s?environmentIdentifier=hpb`
+`https://app.harness.io/ng/account/cTU1lRSWS2SSRV9phKvuOA/module/chaos/orgs/workshop/projects/team_1/settings/discovery`
 
-Open **that** agent after stage 2 replaces it. Name should be **`banking-1`** (PnC’s is `banking1`). Id is still `hpbk8s`. Delete leftovers `hpb-discovery-team-1`, `hpb_k8s`, and `custom-discovery-agent` if they remain.
+Open agent **`hpb-discovery-team-1`**. PnC’s is **`DA-banking-1`** (dropdown ns **workspace**). Do not name the workshop agent `banking-1`. Delete leftover agents named `banking-1`, `hpb_k8s`, and `custom-discovery-agent`.
 
 1. UI: **Organizations → workshop → project team-1** (id `team_1`), not PnC / `team1`.
-2. Confirm env `hpb`, infra **`hpbk8s`**, discovery **`banking-1`**, chaos `hpb-chaos-team-1`.
-3. On the discovery agent: Inclusion = **`banking-1` only** (the hyphenated EKS name, not PnC’s `banking1`). After the first cron (`*/10 * * * *`, wait up to 10 minutes, then refresh) the **Namespaces** list should show `banking-1` and **Services** should match `kubectl get svc,deploy -n banking-1` on **hpb-eks**.
+2. Confirm env `hpb`, infra **`hpbk8s`**, discovery **`hpb-discovery-team-1`**, chaos `hpb-chaos-team-1`.
+3. Settings: Inclusion = **`banking-1`**. After the first cron (wait up to 10 minutes, refresh) the **Namespace** dropdown should list `banking-1` and tiles should match `kubectl get svc -n banking-1` (account-service, auth-service, …).
 4. On **hpb-eks** (not the pipeline delegate’s cluster):
 
 ```bash
 aws eks update-kubeconfig --region us-east-1 --name hpb-eks
 kubectl get pods -n harness-delegate-ng -l app.kubernetes.io/instance=hpb-workshop-delegate
 kubectl get pods,svc,deploy -n banking-1
-# collector / sd-agent pods in banking-1 (cluster-scoped install, Inclusion = banking-1)
-kubectl get pods -n banking-1 | grep -Ei 'sd-|discovery|collector'
+kubectl get pods -n hpb-sd-1
 ```
 
 5. Turn Skip Refresh Command **off** if you had turned it on. Do not leave `TF_VAR_create_organization=false` on the step.
@@ -338,7 +337,7 @@ Fix in Git, push `automate_workshop`, retry **stage 2**. Do not destroy EKS.
 | Refresh `Not Found` on discovery | Agent gone in Harness but still in state. Harness runs **`terraform refresh`** separately | `removed { destroy = false }` on old address; skip refresh **only for that apply**. `TF_CLI_ARGS_apply` does not skip it |
 | Plan destroys `harness_platform_organization.this[0]` | `TF_VAR_create_organization=false` while org is in state | Keep `create_organization=true`. `prevent_destroy` on the org |
 | `bash: null: command not found` in `install_chaos` | `install_command` is null; script retried 8×20s | Default `apply_chaos_install_command=false`; treat `null` as skip |
-| Discovery SUCCESS, 0 namespaces / 0 services | Agent created `namespaced=true` (Role only). Omitting the field on update does **not** PATCH it to false. PnC `banking1` is cluster-scoped + Inclusion | `namespaced = false` explicitly; `terraform_data.discovery_cluster_scope` force-replaces collectors. Agent **name** = `banking-N`. Inclusion `observed_namespaces = [banking-N]` (hyphen). Open org **workshop** / `team_1` / id `hpbk8s`, not PnC `team1`/`banking1` |
+| Discovery Connected, empty Namespace dropdown | Agent named after the app ns (`banking-1`); collectors installed **in** `banking-1`; node agent off. PnC agent is **DA-banking-1**, dropdown ns is **workspace** | Name `hpb-discovery-team-N`. Install in dedicated `hpb-sd-N`. Inclusion `banking-N`. `enable_node_agent = true`. Re-apply stage 2. |
 
 ## If something already existed (rename)
 
@@ -359,7 +358,7 @@ Do not destroy `infrastructure/` just to rename teams.
 - `create_organization` + org `prevent_destroy`. Data lookup only when org is **not** in state.
 - Delegate Helm: `wait=false`, `upgrade_install`, `take_ownership`, upgrader off; ready poll uses **hpb-eks** kubeconfig.
 - Infra identifier **`hpbk8s`**; validation rejects `_` and `-`.
-- Discovery: name = `banking-N`; `namespaced = false` explicit; `terraform_data.discovery_cluster_scope` force-replaces collectors; Inclusion `banking-N`; address `workshop`.
+- Discovery: name `hpb-discovery-team-N`; collectors in `hpb-sd-N`; Inclusion `banking-N`; node agent on; force-replace via `terraform_data.discovery_cluster_scope`.
 - Chaos v2 on `hpbk8s`; `apply_chaos_install_command` default false.
 - Optional experiment import from a **this-account** hub only.
 

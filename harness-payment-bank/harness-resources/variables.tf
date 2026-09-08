@@ -306,7 +306,7 @@ variable "infra_name" {
 # --- Discovery / chaos ---
 
 variable "discovery_agent_name_prefix" {
-  description = "Empty = name the agent after the Kubernetes namespace (banking-1), same pattern as PnC banking1. Set to override as <prefix>-<project name> (hpb-discovery-team-1)."
+  description = "Name becomes <prefix>-<project name> (hpb-discovery-team-1). Empty = <resource_prefix>-discovery. Do not name the agent after the K8s namespace; PnC uses DA-banking-1 while the dropdown ns is workspace."
   type        = string
   default     = ""
 }
@@ -318,7 +318,7 @@ variable "discovery_installation_type" {
 }
 
 variable "discovery_install_namespace" {
-  description = "Namespace where collector pods are installed. Empty = the project's app namespace (banking-N). Agent stays cluster-scoped; Inclusion (observed_namespaces) is still that one namespace. Do not set namespaced=true — the UI cannot list namespaces without a ClusterRole."
+  description = "Dedicated namespace for collector pods (not the app ns). Empty = create hpb-sd-N per team. Inclusion still watches banking-N."
   type        = string
   default     = ""
 }

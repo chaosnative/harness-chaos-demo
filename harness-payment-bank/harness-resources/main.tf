@@ -495,18 +495,36 @@ removed {
   lifecycle { destroy = false }
 }
 
-# Bump this input to force-replace collectors. Omitting namespaced on an
-# existing agent does not PATCH namespaced=false, so a namespaced install
-# stays Role-only and the UI stays at 0 namespaces / 0 services.
+# Dedicated install ns per team (hpb-sd-1, …). Docs: agent Namespace is where
+# Harness runs collectors — not the app ns. PnC DA-banking-1 discovers
+# workspace in the dropdown; the agent name is not the K8s namespace.
+resource "kubernetes_namespace_v1" "discovery" {
+  for_each = var.discovery_install_namespace == "" ? local.projects : {}
+
+  wait_for_default_service_account = true
+
+  metadata {
+    name = "${var.resource_prefix}-sd-${each.value.index}"
+    labels = {
+      "app.kubernetes.io/name"       = "harness-service-discovery"
+      "app.kubernetes.io/part-of"    = "hpb-workshop"
+      "app.kubernetes.io/managed-by" = "terraform"
+      "hpb.harness.io/app-namespace" = each.value.namespace
+    }
+  }
+
+  depends_on = [data.aws_eks_cluster.this]
+}
+
+# Bump this input to force-replace collectors after scope/install-ns changes.
 resource "terraform_data" "discovery_cluster_scope" {
-  input = "v2-cluster-inclusion"
+  input = "v3-sd-ns-node-agent"
 }
 
 resource "harness_service_discovery_agent" "workshop" {
   for_each = local.projects
 
-  # PnC team1 agent is named banking1. Same mapping here: team-1 → banking-1.
-  name                   = var.discovery_agent_name_prefix != "" ? "${local.discovery_name_prefix}-${each.value.name}" : each.value.namespace
+  name                   = "${local.discovery_name_prefix}-${each.value.name}"
   org_identifier         = local.org_identifier
   project_identifier     = harness_platform_project.this[each.key].identifier
   environment_identifier = harness_platform_environment.this[each.key].identifier
@@ -516,14 +534,16 @@ resource "harness_service_discovery_agent" "workshop" {
 
   config {
     kubernetes {
-      namespace                  = var.discovery_install_namespace != "" ? var.discovery_install_namespace : each.value.namespace
+      namespace = var.discovery_install_namespace != "" ? var.discovery_install_namespace : kubernetes_namespace_v1.discovery[each.key].metadata[0].name
       namespaced                 = false
-      disable_namespace_creation = false
+      disable_namespace_creation = true
     }
     data {
-      # Inclusion only — mutually exclusive with Exclusion (blacklisted_namespaces).
-      # team-1 → banking-1, team-2 → banking-2. Must match the EKS name (hyphen).
+      # Inclusion only — team-1 dropdown should list banking-1 (not the
+      # install ns hpb-sd-1). Mutually exclusive with blacklisted_namespaces.
       observed_namespaces      = [each.value.namespace]
+      enable_node_agent        = true
+      enable_batch_resources   = true
       collection_window_in_min = 10
       cron {
         expression = var.discovery_cron_expression
@@ -538,6 +558,7 @@ resource "harness_service_discovery_agent" "workshop" {
   depends_on = [
     harness_platform_infrastructure.this,
     harness_platform_connector_kubernetes.eks,
+    kubernetes_namespace_v1.discovery,
   ]
 }
 
