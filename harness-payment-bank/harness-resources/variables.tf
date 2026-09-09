@@ -454,8 +454,9 @@ variable "chaos_service_account" {
 }
 
 variable "ai_enabled" {
-  type    = bool
-  default = true
+  description = "Enable AI features on the chaos infrastructure. Off for the workshop. This is also the only candidate lever for the event-watcher install: the resource schema has no event_watcher toggle and image_registry.custom_images has no event_watcher entry, so the watcher is driven outside the Terraform surface and AI event collection is the likeliest owner."
+  type        = bool
+  default     = false
 }
 
 variable "apply_chaos_install_command" {
