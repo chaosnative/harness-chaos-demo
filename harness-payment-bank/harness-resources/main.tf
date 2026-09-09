@@ -498,6 +498,28 @@ resource "harness_platform_environment" "this" {
   force_delete = true
 }
 
+# The API stores the tags declared in the YAML body and ignores anything extra
+# in the tags attribute, so the two must be generated from one list. Hardcoding
+# only workshop + namespace in the YAML while the attribute also carried
+# project + managedby meant those two never persisted and every plan re-issued
+# the same in-place tag update forever.
+locals {
+  infra_tags = {
+    for k, p in local.projects : k => concat(local.tags, ["namespace:${p.namespace}"])
+  }
+
+  # Split on the first colon only, so a value containing one (a URL, say)
+  # survives instead of being silently truncated.
+  infra_tags_yaml = {
+    for k, tags in local.infra_tags : k => join("\n", [
+      for t in tags : format("    %s: %q",
+        split(":", t)[0],
+        join(":", slice(split(":", t), 1, length(split(":", t))))
+      )
+    ])
+  }
+}
+
 resource "harness_platform_infrastructure" "this" {
   for_each = local.projects
 
@@ -509,7 +531,7 @@ resource "harness_platform_infrastructure" "this" {
   type            = "KubernetesDirect"
   deployment_type = "Kubernetes"
   force_delete    = true
-  tags            = concat(local.tags, ["namespace:${each.value.namespace}"])
+  tags            = local.infra_tags[each.key]
 
   lifecycle {
     create_before_destroy = true
@@ -524,8 +546,7 @@ infrastructureDefinition:
   environmentRef: ${local.environment_id}
   description: HPB workshop Kubernetes infrastructure for ${each.value.namespace}
   tags:
-    workshop: "true"
-    namespace: ${each.value.namespace}
+${local.infra_tags_yaml[each.key]}
   deploymentType: Kubernetes
   type: KubernetesDirect
   spec:
@@ -783,7 +804,10 @@ resource "null_resource" "install_chaos" {
     interpreter = ["/bin/bash", "-c"]
     command     = <<-EOT
       set -euo pipefail
-      CMD=${jsonencode(coalesce(harness_chaos_infrastructure_v2.this[each.key].install_command, ""))}
+      # Not coalesce(): it rejects "" as well as null, so a null install_command
+      # (which is what this API returns for connector-based DDCR) made the
+      # whole apply fail with "no non-null, non-empty-string arguments".
+      CMD=${jsonencode(try(harness_chaos_infrastructure_v2.this[each.key].install_command, "") == null ? "" : try(harness_chaos_infrastructure_v2.this[each.key].install_command, ""))}
       if [ -z "$${CMD}" ] || [ "$${CMD}" = "null" ]; then
         echo "No chaos install command for ${each.value.namespace}; DDCR uses connector ${local.k8s_connector_id}"
         exit 0
