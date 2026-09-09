@@ -625,19 +625,6 @@ resource "terraform_data" "discovery_agent_binding" {
   ])
 }
 
-# destroy = false is essential: the objects are already gone server-side, so a
-# real destroy would 404 and fail the plan exactly like the refresh does. This
-# only drops the dead instances from state. Delete this block once one apply has
-# gone green — leaving it in place would make every later apply forget the
-# agents it just created.
-removed {
-  from = harness_service_discovery_agent.workshop
-
-  lifecycle {
-    destroy = false
-  }
-}
-
 # Destroying harness_chaos_infrastructure_v2 also deleted the agent records
 # behind it — they share the infra_id keyspace in the chaos service — and the
 # provider answers a refresh of a deleted agent with a bare "Not Found" instead
@@ -687,6 +674,11 @@ resource "harness_service_discovery_agent" "agent" {
       terraform_data.discovery_cluster_scope,
       terraform_data.discovery_agent_binding[each.key],
     ]
+
+    # The API reports CONNECTOR while the provider never sends the field, so
+    # leaving it unset still shows "CONNECTOR" -> null and re-PATCHes all four
+    # agents on every apply.
+    ignore_changes = [installation_type]
   }
 
   depends_on = [
@@ -753,6 +745,25 @@ resource "harness_chaos_infrastructure_v2" "this" {
       cpu    = "500m"
       memory = "512Mi"
     }
+  }
+
+  # infra_scope is immutable per the provider docs, and the server does not
+  # persist NAMESPACE on create — it stores CLUSTER and the namespace field
+  # alone decides where the components land (infra_namespace reads back as
+  # banking-N). A config asking for NAMESPACE therefore never converges: every
+  # plan sees CLUSTER -> NAMESPACE, forces replacement, and the recreate races
+  # its own delete for the account_org_project_env_identity unique index, which
+  # is what returned "E11000 duplicate key" for three of four projects.
+  #
+  # The empty maps are the same class of noise: the API returns {} where config
+  # has nothing, so each one is an in-place update on every run for no effect.
+  lifecycle {
+    ignore_changes = [
+      infra_scope,
+      annotation,
+      label,
+      node_selector,
+    ]
   }
 
   depends_on = [harness_service_discovery_agent.agent]

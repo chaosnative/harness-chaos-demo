@@ -438,8 +438,9 @@ variable "chaos_infra_type" {
 }
 
 variable "chaos_infra_scope" {
-  type    = string
-  default = "NAMESPACE"
+  description = "CLUSTER is the only value that converges: the server ignores NAMESPACE on create and stores CLUSTER, and the field is immutable, so asking for NAMESPACE replaces all four infrastructures on every apply. Namespace confinement comes from namespace = banking-N, not from this field."
+  type        = string
+  default     = "CLUSTER"
 
   validation {
     condition     = contains(["NAMESPACE", "CLUSTER"], var.chaos_infra_scope)
@@ -458,9 +459,9 @@ variable "ai_enabled" {
 }
 
 variable "apply_chaos_install_command" {
-  description = "Run chaos infra install_command via kubectl. CONNECTOR/DDCR returns null; leave false. true only if Harness returns a real shell command."
+  description = "Run the chaos infra install_command via kubectl. Creating the Harness record registers the infrastructure but does not install DDCR into the cluster — running this command is what creates the event-watcher and ddcr workloads. The step already treats a null command as a skip, so true is safe either way."
   type        = bool
-  default     = false
+  default     = true
 }
 
 # --- Experiment import (one template into every team project) ---
