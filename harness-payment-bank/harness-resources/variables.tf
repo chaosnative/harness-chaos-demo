@@ -6,10 +6,10 @@
 # Terraform language in this folder is only main.tf + this file.
 #
 # What this root creates (one terraform apply):
-#   1. Organization
-#   2. Organization
+#   1. Organization workshop
+#   2. Org ChaosHub + experiment templates (create_org_chaos_templates)
 #   3. One Harness project per namespace: banking-N → project team_N / team-N
-#   4. Org-scoped delegate token + Kubernetes delegate on the EKS cluster
+#   4. Account-scoped delegate token + Kubernetes delegate on the EKS cluster
 #   5. Per project: K8s connector, Prometheus, environment, infra, discovery, chaos v2
 #   6. Per project: import chaos experiment from a hub template (if identities are set)
 #
@@ -465,16 +465,50 @@ variable "apply_chaos_install_command" {
   default     = true
 }
 
+# --- Org experiment templates on the existing custom-hub-workshop ---
+# Looks up the hub; does not create a ChaosHub, probe, or action template.
+# Identities match PnC / the live workshop hub. import {} adopts them.
+# https://registry.terraform.io/providers/harness/harness/latest/docs/resources/chaos_experiment_template
+
+variable "create_org_chaos_templates" {
+  description = "Manage the ten HPB experiment templates on the existing org ChaosHub (custom-hub-workshop). Does not create a hub. Does not modify projects, connectors, discovery, or chaos infra."
+  type        = bool
+  default     = true
+}
+
+variable "adopt_existing_org_chaos_templates" {
+  description = "Import existing experiment templates by identity from custom-hub-workshop so apply updates them instead of creating duplicates. Set false only when those identities do not exist yet."
+  type        = bool
+  default     = true
+}
+
+variable "chaos_hub_identity" {
+  description = "Existing org-level ChaosHub identity (no org. prefix). Must already exist; Terraform looks it up and does not create a hub."
+  type        = string
+  default     = "custom-hub-workshop"
+
+  validation {
+    condition     = can(regex("^[a-zA-Z][a-zA-Z0-9_-]*$", var.chaos_hub_identity))
+    error_message = "chaos_hub_identity must start with a letter and contain only letters, digits, underscores, and hyphens."
+  }
+}
+
+variable "chaos_hub_name" {
+  description = "ChaosHub display name. Empty = chaos_hub_identity."
+  type        = string
+  default     = "custom-hub-workshop"
+}
+
 # --- Experiment import (one template into every team project) ---
 
 variable "experiment_hub_identity" {
-  description = "Chaos hub in THIS account (workshop org or account-level). Example: org.workshop_chaos_hub. Empty = skip experiment import. Do not point at PnC."
+  description = "Chaos hub in THIS account (workshop org). Example: org.custom-hub-workshop. Empty = skip per-project experiment import. Do not point at PnC."
   type        = string
   default     = ""
 }
 
 variable "experiment_template_identity" {
-  description = "Identity of an experiment template that already exists in this account's hub. Empty = skip import."
+  description = "Identity of an experiment template in this account's hub (for example txnservicedependencyfailure). Empty = skip per-project import."
   type        = string
   default     = ""
 }

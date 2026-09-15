@@ -6,16 +6,19 @@
 # Order:
 #   1. Read infrastructure remote state (cluster + banking-N) unless overridden
 #   2. Organization workshop
-#   3. Projects team-N (one per namespace banking-N)
-#   4. Org delegate token + Helm on EKS; wait for registration
-#   5. Optional org AWS connector
-#   6. Per project: K8s connector, Prometheus, environment, infra, discovery,
+#   3. Org experiment templates on existing custom-hub-workshop (gated; no new hub)
+#   4. Projects team-N (one per namespace banking-N)
+#   5. Org delegate token + Helm on EKS; wait for registration
+#   6. Optional org AWS connector
+#   7. Per project: K8s connector, Prometheus, environment, infra, discovery,
 #      chaos v2, experiment import from a chaos hub template (if ids are set)
 #
 # Connector "templates" are not created here. Harness NG template types do not
 # include Connector (only Step, Stage, Pipeline, …). Connectors are created
-# with harness_platform_connector_* (InheritFromDelegate). Chaos experiment
-# templates are a different product (hub); import uses harness_chaos_experiment.
+# with harness_platform_connector_* (InheritFromDelegate).
+# Chaos experiment templates live on the existing org hub custom-hub-workshop
+# (data.harness_chaos_hub_v2). Identities match PnC / the live hub so apply
+# updates in place. Do not create a second hub.
 #
 # Failure / retry: do not terraform destroy this root on error. Re-run apply.
 # Resources already in state are left alone; missing ones are created.
@@ -224,6 +227,605 @@ data "harness_platform_organization" "this" {
   count = var.create_organization ? 0 : 1
 
   identifier = local.org_id
+}
+
+# -----------------------------------------------------------------------------
+# Org ChaosHub + experiment templates
+# Registry: data.harness_chaos_hub_v2 (existing custom-hub-workshop),
+# chaos_experiment_template. Org-scoped: org_id set, project_id omitted.
+# Does not create a ChaosHub, probe template, or action template.
+# Experiment identities/names match PnC and the live workshop hub
+# (e.g. txnservicedependencyfailure). import {} adopts those objects so
+# apply updates them. Per-project harness_chaos_experiment.from_template
+# is still skipped unless experiment_* identities are set.
+# -----------------------------------------------------------------------------
+
+locals {
+  chaos_hub_name = var.chaos_hub_name != "" ? var.chaos_hub_name : var.chaos_hub_identity
+  chaos_hub_ref  = "org.${var.chaos_hub_identity}"
+
+  # Existing probe/action identities in custom-hub-workshop (do not create new ones).
+  chaos_probe_txn_id  = "hpb-transation-svc-health-check"
+  chaos_probe_user_id = "banking-user-api-check"
+  chaos_delay_id      = "delay-action-template"
+
+  # TARGET_NAMESPACE picker: only banking-i for project team_i.
+  # Probe/fault DNS cannot use experiment.variables (provider spec has no
+  # variables block), so those strings derive the same namespace from the project.
+  chaos_ns_from_project = "<+replace(<+project.identifier>,\"team_\",\"banking-\")>"
+  chaos_ns_input        = "<+input>.allowedValues(<+replace(<+project.identifier>,\"team_\",\"banking-\")>)"
+  chaos_ns              = local.chaos_ns_input
+  chaos_gateway_dns     = "gateway-service.<+replace(<+project.identifier>,\"team_\",\"banking-\")>"
+  chaos_postgres_dns    = "postgresql.<+replace(<+project.identifier>,\"team_\",\"banking-\")>.svc.cluster.local"
+  chaos_url = {
+    gateway_health = "http://gateway-service.<+replace(<+project.identifier>,\"team_\",\"banking-\")>:8080/actuator/health"
+    gateway_txn    = "http://gateway-service.<+replace(<+project.identifier>,\"team_\",\"banking-\")>:8080/api/v1/transactions/account/1?page=0&size=20&sort=createdAt,desc"
+    gateway_user   = "http://gateway-service.<+replace(<+project.identifier>,\"team_\",\"banking-\")>:8080/api/v1/accounts/user/4"
+  }
+  chaos_probe_values = {
+    health = [
+      { name = "URL", value = "http://gateway-service.<+replace(<+project.identifier>,\"team_\",\"banking-\")>:8080/actuator/health" },
+      { name = "AUTH_CREDENTIALS", value = "<+input>" },
+    ]
+    txn = [
+      { name = "URL", value = "http://gateway-service.<+replace(<+project.identifier>,\"team_\",\"banking-\")>:8080/api/v1/transactions/account/1?page=0&size=20&sort=createdAt,desc" },
+      { name = "AUTH_CREDENTIALS", value = "<+input>" },
+    ]
+    user = [
+      { name = "URL", value = "http://gateway-service.<+replace(<+project.identifier>,\"team_\",\"banking-\")>:8080/api/v1/accounts/user/4" },
+      { name = "AUTH_CREDENTIALS", value = "<+input>" },
+    ]
+  }
+
+  chaos_experiment_templates = {
+    gateway_pod_delete = {
+      identity    = "gatewayservicepodrestart"
+      name        = "gateway-service-pod-restart"
+      description = "Delete gateway-service pods and check gateway APIs before, during, and after the fault. Namespace is TARGET_NAMESPACE; probe URLs use in-cluster DNS gateway-service.<namespace>."
+      tags        = ["hpb", "gateway", "pod-delete"]
+      faults = [{
+        identity = "pod-delete"
+        name     = "gateway-pod-delete-fault"
+        values = [
+          { name = "TARGET_WORKLOAD_KIND", value = "deployment" },
+          { name = "TARGET_WORKLOAD_NAMES", value = "gateway-service" },
+          { name = "TARGET_WORKLOAD_NAMESPACE", value = local.chaos_ns },
+          { name = "TOTAL_CHAOS_DURATION", value = "120" },
+          { name = "POD_AFFECTED_PERCENTAGE", value = "100" },
+          { name = "CHAOS_INTERVAL", value = "20" },
+        ]
+      }]
+      probes = [
+        {
+          name   = "probe-txn-pre", identity = local.chaos_probe_txn_id, duration = "30s"
+          values = local.chaos_probe_values.txn
+        },
+        {
+          name   = "probe-health", identity = local.chaos_probe_txn_id, duration = "30s"
+          values = local.chaos_probe_values.health
+        },
+        {
+          name   = "probe-user", identity = local.chaos_probe_user_id, duration = "30s"
+          values = local.chaos_probe_values.user
+        },
+        {
+          name   = "probe-txn-post", identity = local.chaos_probe_txn_id, duration = "30s"
+          values = local.chaos_probe_values.txn
+        },
+      ]
+      actions = []
+      vertices = [
+        { name = "pre", start = { probes = ["probe-txn-pre"] }, end = {} },
+        { name = "fault", start = { probes = ["probe-health", "probe-user"], faults = ["gateway-pod-delete-fault"] }, end = { probes = ["probe-txn-pre"] } },
+        { name = "post", start = { probes = ["probe-txn-post"] }, end = { probes = ["probe-health", "probe-user"], faults = ["gateway-pod-delete-fault"] } },
+        { name = "v-end", start = {}, end = { probes = ["probe-txn-post"] } },
+      ]
+    }
+
+    gateway_cpu_hog = {
+      identity    = "gatewaysvccpuhog"
+      name        = "gateway-svc-cpu-hog"
+      description = "CPU hog on gateway-service with a delay action around the fault. HTTP probe uses in-cluster DNS gateway-service.<TARGET_NAMESPACE>."
+      tags        = ["hpb", "gateway", "cpu-hog"]
+      faults = [{
+        identity = "pod-cpu-hog"
+        name     = "gateway-cpu-hog-fault"
+        values = [
+          { name = "TARGET_WORKLOAD_KIND", value = "deployment" },
+          { name = "TARGET_WORKLOAD_NAMES", value = "gateway-service" },
+          { name = "TARGET_WORKLOAD_NAMESPACE", value = local.chaos_ns },
+          { name = "TOTAL_CHAOS_DURATION", value = "120" },
+          { name = "POD_AFFECTED_PERCENTAGE", value = "100" },
+          { name = "CPU_CORES", value = "2" },
+          { name = "CPU_LOAD", value = "100" },
+        ]
+      }]
+      probes = [
+        {
+          name   = "probe-during", identity = local.chaos_probe_txn_id, duration = "30s"
+          values = local.chaos_probe_values.health
+        },
+      ]
+      actions = [{
+        identity = local.chaos_delay_id
+        name     = "delay-30s"
+        values   = [{ name = "DURATION", value = "30s" }]
+      }]
+      vertices = [
+        { name = "pre", start = { actions = ["delay-30s"] }, end = {} },
+        { name = "fault", start = { probes = ["probe-during"], faults = ["gateway-cpu-hog-fault"] }, end = { actions = ["delay-30s"] } },
+        { name = "v-end", start = {}, end = { probes = ["probe-during"], faults = ["gateway-cpu-hog-fault"] } },
+      ]
+    }
+
+    service_pod_delete = {
+      identity    = "servicerestart"
+      name        = "service-restart"
+      description = "Generic pod-delete against a workload name and namespace supplied at import/run time."
+      tags        = ["hpb", "pod-delete"]
+      faults = [{
+        identity = "pod-delete"
+        name     = "service-pod-delete-fault"
+        values = [
+          { name = "TARGET_WORKLOAD_KIND", value = "deployment" },
+          { name = "TARGET_WORKLOAD_NAMES", value = "<+input>" },
+          { name = "TARGET_WORKLOAD_NAMESPACE", value = local.chaos_ns },
+          { name = "TOTAL_CHAOS_DURATION", value = "120" },
+          { name = "POD_AFFECTED_PERCENTAGE", value = "100" },
+          { name = "CHAOS_INTERVAL", value = "20" },
+        ]
+      }]
+      probes = [
+        {
+          name   = "probe-pre", identity = local.chaos_probe_txn_id, duration = "30s"
+          values = local.chaos_probe_values.health
+        },
+        {
+          name   = "probe-during", identity = local.chaos_probe_txn_id, duration = "30s"
+          values = local.chaos_probe_values.txn
+        },
+        {
+          name   = "probe-post", identity = local.chaos_probe_txn_id, duration = "30s"
+          values = local.chaos_probe_values.txn
+        },
+      ]
+      actions = []
+      vertices = [
+        { name = "pre", start = { probes = ["probe-pre"] }, end = {} },
+        { name = "fault", start = { probes = ["probe-during"], faults = ["service-pod-delete-fault"] }, end = { probes = ["probe-pre"] } },
+        { name = "post", start = { probes = ["probe-post"] }, end = { probes = ["probe-during"], faults = ["service-pod-delete-fault"] } },
+        { name = "v-end", start = {}, end = { probes = ["probe-post"] } },
+      ]
+    }
+
+    transaction_sql_exception = {
+      identity    = "transactionsqlinjectexception"
+      name        = "transaction-sql-inject-exception"
+      description = "JVM SQL exception on transaction-service SELECT against the transactions table (Hibernate)."
+      tags        = ["hpb", "transaction-service", "jvm"]
+      faults = [{
+        identity = "pod-jvm-sql-exception"
+        name     = "txn-sql-exception-fault"
+        values = [
+          { name = "TARGET_WORKLOAD_KIND", value = "deployment" },
+          { name = "TARGET_WORKLOAD_NAMES", value = "transaction-service" },
+          { name = "TARGET_WORKLOAD_NAMESPACE", value = local.chaos_ns },
+          { name = "TOTAL_CHAOS_DURATION", value = "120" },
+          { name = "TABLE", value = "transactions" },
+          { name = "SQL_OPERATION", value = "select" },
+          { name = "SQL_DATA_ACCESS_FRAMEWORK", value = "HIBERNATE" },
+        ]
+      }]
+      probes = [
+        {
+          name   = "probe-pre", identity = local.chaos_probe_txn_id, duration = "30s"
+          values = local.chaos_probe_values.txn
+        },
+        {
+          name   = "probe-during", identity = local.chaos_probe_txn_id, duration = "30s"
+          values = local.chaos_probe_values.txn
+        },
+        {
+          name   = "probe-post", identity = local.chaos_probe_txn_id, duration = "30s"
+          values = local.chaos_probe_values.txn
+        },
+      ]
+      actions = []
+      vertices = [
+        { name = "pre", start = { probes = ["probe-pre"] }, end = {} },
+        { name = "fault", start = { probes = ["probe-during"], faults = ["txn-sql-exception-fault"] }, end = { probes = ["probe-pre"] } },
+        { name = "post", start = { probes = ["probe-post"] }, end = { probes = ["probe-during"], faults = ["txn-sql-exception-fault"] } },
+        { name = "v-end", start = {}, end = { probes = ["probe-post"] } },
+      ]
+    }
+
+    transaction_network_loss = {
+      identity    = "txnservicedependencyfailure"
+      name        = "txn-service-dependency-failure"
+      description = "Block transaction-service traffic to gateway-service (dependency failure)."
+      tags        = ["hpb", "transaction-service", "network"]
+      faults = [{
+        identity = "pod-network-loss"
+        name     = "txn-network-loss-fault"
+        values = [
+          { name = "TARGET_WORKLOAD_KIND", value = "deployment" },
+          { name = "TARGET_WORKLOAD_NAMES", value = "transaction-service" },
+          { name = "TARGET_WORKLOAD_NAMESPACE", value = local.chaos_ns },
+          { name = "TOTAL_CHAOS_DURATION", value = "120" },
+          { name = "POD_AFFECTED_PERCENTAGE", value = "100" },
+          { name = "DESTINATION_HOSTS", value = local.chaos_gateway_dns },
+        ]
+      }]
+      probes = [
+        {
+          name   = "probe-pre", identity = local.chaos_probe_txn_id, duration = "30s"
+          values = local.chaos_probe_values.txn
+        },
+        {
+          name   = "probe-during", identity = local.chaos_probe_txn_id, duration = "30s"
+          values = local.chaos_probe_values.txn
+        },
+        {
+          name   = "probe-post", identity = local.chaos_probe_txn_id, duration = "30s"
+          values = local.chaos_probe_values.txn
+        },
+      ]
+      actions = []
+      vertices = [
+        { name = "pre", start = { probes = ["probe-pre"] }, end = {} },
+        { name = "fault", start = { probes = ["probe-during"], faults = ["txn-network-loss-fault"] }, end = { probes = ["probe-pre"] } },
+        { name = "post", start = { probes = ["probe-post"] }, end = { probes = ["probe-during"], faults = ["txn-network-loss-fault"] } },
+        { name = "v-end", start = {}, end = { probes = ["probe-post"] } },
+      ]
+    }
+
+    account_db_network_loss = {
+      identity    = "accountsvcdbfailure"
+      name        = "account-svc-db-failure"
+      description = "Network loss from account-service to PostgreSQL at postgresql.<TARGET_NAMESPACE>.svc.cluster.local."
+      tags        = ["hpb", "account-service", "network"]
+      faults = [{
+        identity = "pod-network-loss"
+        name     = "account-db-network-loss-fault"
+        values = [
+          { name = "TARGET_WORKLOAD_KIND", value = "deployment" },
+          { name = "TARGET_WORKLOAD_NAMES", value = "account-service" },
+          { name = "TARGET_WORKLOAD_NAMESPACE", value = local.chaos_ns },
+          { name = "TOTAL_CHAOS_DURATION", value = "120" },
+          { name = "DESTINATION_HOSTS", value = local.chaos_postgres_dns },
+        ]
+      }]
+      probes = [
+        {
+          name   = "probe-pre", identity = local.chaos_probe_txn_id, duration = "30s"
+          values = local.chaos_probe_values.txn
+        },
+        {
+          name   = "probe-during", identity = local.chaos_probe_txn_id, duration = "30s"
+          values = local.chaos_probe_values.user
+        },
+        {
+          name   = "probe-post", identity = local.chaos_probe_txn_id, duration = "30s"
+          values = local.chaos_probe_values.txn
+        },
+      ]
+      actions = []
+      vertices = [
+        { name = "pre", start = { probes = ["probe-pre"] }, end = {} },
+        { name = "fault", start = { probes = ["probe-during"], faults = ["account-db-network-loss-fault"] }, end = { probes = ["probe-pre"] } },
+        { name = "post", start = { probes = ["probe-post"] }, end = { probes = ["probe-during"], faults = ["account-db-network-loss-fault"] } },
+        { name = "v-end", start = {}, end = { probes = ["probe-post"] } },
+      ]
+    }
+
+    account_jvm_method_exception = {
+      identity    = "accountsvcjavamethodexception"
+      name        = "account-svc-java-method-exception"
+      description = "NullPointerException on AccountService.getAccountsByUserId in account-service."
+      tags        = ["hpb", "account-service", "jvm"]
+      faults = [{
+        identity = "pod-jvm-method-exception"
+        name     = "account-jvm-method-fault"
+        values = [
+          { name = "TARGET_WORKLOAD_KIND", value = "deployment" },
+          { name = "TARGET_WORKLOAD_NAMES", value = "account-service" },
+          { name = "TARGET_WORKLOAD_NAMESPACE", value = local.chaos_ns },
+          { name = "TOTAL_CHAOS_DURATION", value = "120" },
+          { name = "POD_AFFECTED_PERCENTAGE", value = "100" },
+          { name = "CLASS", value = "com.example.account.service.AccountService" },
+          { name = "METHOD", value = "getAccountsByUserId" },
+          { name = "EXCEPTION", value = "NullPointerException(\"Hello, NullPointerException!\")" },
+        ]
+      }]
+      probes = [
+        {
+          name   = "probe-pre", identity = local.chaos_probe_txn_id, duration = "30s"
+          values = local.chaos_probe_values.txn
+        },
+        {
+          name   = "probe-during", identity = local.chaos_probe_txn_id, duration = "30s"
+          values = local.chaos_probe_values.user
+        },
+        {
+          name   = "probe-post", identity = local.chaos_probe_txn_id, duration = "30s"
+          values = local.chaos_probe_values.txn
+        },
+      ]
+      actions = []
+      vertices = [
+        { name = "pre", start = { probes = ["probe-pre"] }, end = {} },
+        { name = "fault", start = { probes = ["probe-during"], faults = ["account-jvm-method-fault"] }, end = { probes = ["probe-pre"] } },
+        { name = "post", start = { probes = ["probe-post"] }, end = { probes = ["probe-during"], faults = ["account-jvm-method-fault"] } },
+        { name = "v-end", start = {}, end = { probes = ["probe-post"] } },
+      ]
+    }
+
+    account_api_status_code = {
+      identity    = "accountsvcegressapistatuscodechange"
+      name        = "account-svc-egress-api-status-code-change"
+      description = "Force HTTP 500 on account-service ingress /user for 100% of traffic."
+      tags        = ["hpb", "account-service", "http"]
+      faults = [{
+        identity = "pod-api-status-code"
+        name     = "account-api-status-fault"
+        values = [
+          { name = "TARGET_WORKLOAD_KIND", value = "deployment" },
+          { name = "TARGET_WORKLOAD_NAMES", value = "account-service" },
+          { name = "TARGET_WORKLOAD_NAMESPACE", value = local.chaos_ns },
+          { name = "TOTAL_CHAOS_DURATION", value = "120" },
+          { name = "STATUS_CODE", value = "500" },
+          { name = "TARGET_SERVICE_PORT", value = "10080" },
+          { name = "TRANSACTION_PERCENTAGE", value = "100" },
+          { name = "SERVICE_DIRECTION", value = "ingress" },
+          { name = "POD_AFFECTED_PERCENTAGE", value = "100" },
+        ]
+      }]
+      probes = [
+        {
+          name   = "probe-pre", identity = local.chaos_probe_txn_id, duration = "30s"
+          values = local.chaos_probe_values.user
+        },
+        {
+          name   = "probe-during", identity = local.chaos_probe_txn_id, duration = "30s"
+          values = local.chaos_probe_values.user
+        },
+        {
+          name   = "probe-post", identity = local.chaos_probe_txn_id, duration = "30s"
+          values = local.chaos_probe_values.txn
+        },
+      ]
+      actions = []
+      vertices = [
+        { name = "pre", start = { probes = ["probe-pre"] }, end = {} },
+        { name = "fault", start = { probes = ["probe-during"], faults = ["account-api-status-fault"] }, end = { probes = ["probe-pre"] } },
+        { name = "post", start = { probes = ["probe-post"] }, end = { probes = ["probe-during"], faults = ["account-api-status-fault"] } },
+        { name = "v-end", start = {}, end = { probes = ["probe-post"] } },
+      ]
+    }
+
+    notification_mongo_exception = {
+      identity    = "emailservicemongoexception"
+      name        = "emailservice-mongo-exception"
+      description = "JVM Mongo exception on notification-service collection notification_logs."
+      tags        = ["hpb", "notification-service", "jvm"]
+      faults = [{
+        identity = "pod-jvm-mongo-exception"
+        name     = "notification-mongo-fault"
+        values = [
+          { name = "TARGET_WORKLOAD_KIND", value = "deployment" },
+          { name = "TARGET_WORKLOAD_NAMES", value = "notification-service" },
+          { name = "TARGET_WORKLOAD_NAMESPACE", value = local.chaos_ns },
+          { name = "TOTAL_CHAOS_DURATION", value = "120" },
+          { name = "DATABASE", value = "notification" },
+          { name = "COLLECTION", value = "notification_logs" },
+          { name = "TRANSACTION_PERCENTAGE", value = "100" },
+          { name = "POD_AFFECTED_PERCENTAGE", value = "100" },
+        ]
+      }]
+      probes = [
+        {
+          name   = "probe-pre", identity = local.chaos_probe_txn_id, duration = "30s"
+          values = local.chaos_probe_values.txn
+        },
+        {
+          name   = "probe-during", identity = local.chaos_probe_txn_id, duration = "30s"
+          values = local.chaos_probe_values.txn
+        },
+        {
+          name   = "probe-post", identity = local.chaos_probe_txn_id, duration = "30s"
+          values = local.chaos_probe_values.txn
+        },
+      ]
+      actions = []
+      vertices = [
+        { name = "pre", start = { probes = ["probe-pre"] }, end = {} },
+        { name = "fault", start = { probes = ["probe-during"], faults = ["notification-mongo-fault"] }, end = { probes = ["probe-pre"] } },
+        { name = "post", start = { probes = ["probe-post"] }, end = { probes = ["probe-during"], faults = ["notification-mongo-fault"] } },
+        { name = "v-end", start = {}, end = { probes = ["probe-post"] } },
+      ]
+    }
+
+    validator_kafka_exception = {
+      identity    = "kafkaexceptioninpaymentvalidatorservice"
+      name        = "kafka-exception-in-payment-validator-service"
+      description = "JVM Kafka exception on validator-service topic transfer."
+      tags        = ["hpb", "validator-service", "jvm"]
+      faults = [{
+        identity = "pod-jvm-kafka-exception"
+        name     = "validator-kafka-fault"
+        values = [
+          { name = "TARGET_WORKLOAD_KIND", value = "deployment" },
+          { name = "TARGET_WORKLOAD_NAMES", value = "validator-service" },
+          { name = "TARGET_WORKLOAD_NAMESPACE", value = local.chaos_ns },
+          { name = "TOTAL_CHAOS_DURATION", value = "120" },
+          { name = "KAFKA_TOPIC", value = "transfer" },
+          { name = "TRANSACTION_PERCENTAGE", value = "100" },
+          { name = "POD_AFFECTED_PERCENTAGE", value = "100" },
+        ]
+      }]
+      probes = [
+        {
+          name   = "probe-pre", identity = local.chaos_probe_txn_id, duration = "30s"
+          values = local.chaos_probe_values.txn
+        },
+        {
+          name   = "probe-during", identity = local.chaos_probe_txn_id, duration = "30s"
+          values = local.chaos_probe_values.txn
+        },
+        {
+          name   = "probe-post", identity = local.chaos_probe_txn_id, duration = "30s"
+          values = local.chaos_probe_values.txn
+        },
+      ]
+      actions = []
+      vertices = [
+        { name = "pre", start = { probes = ["probe-pre"] }, end = {} },
+        { name = "fault", start = { probes = ["probe-during"], faults = ["validator-kafka-fault"] }, end = { probes = ["probe-pre"] } },
+        { name = "post", start = { probes = ["probe-post"] }, end = { probes = ["probe-during"], faults = ["validator-kafka-fault"] } },
+        { name = "v-end", start = {}, end = { probes = ["probe-post"] } },
+      ]
+    }
+  }
+}
+
+data "harness_chaos_hub_v2" "org" {
+  count = var.create_org_chaos_templates ? 1 : 0
+
+  org_id   = local.org_identifier
+  identity = var.chaos_hub_identity
+}
+
+import {
+  for_each = var.create_org_chaos_templates && var.adopt_existing_org_chaos_templates ? local.chaos_experiment_templates : {}
+  to       = harness_chaos_experiment_template.this[each.key]
+  id       = "${local.org_identifier}/${var.chaos_hub_identity}/${each.value.identity}"
+}
+
+resource "harness_chaos_experiment_template" "this" {
+  for_each = var.create_org_chaos_templates ? local.chaos_experiment_templates : {}
+
+  org_id       = local.org_identifier
+  hub_identity = data.harness_chaos_hub_v2.org[0].identity
+  identity     = each.value.identity
+  name         = each.value.name
+  description  = each.value.description
+  tags         = concat(local.tags, each.value.tags)
+
+  spec {
+    infra_type     = "KubernetesV2"
+    cleanup_policy = "delete"
+
+    dynamic "faults" {
+      for_each = each.value.faults
+      content {
+        identity      = faults.value.identity
+        name          = faults.value.name
+        revision      = "v1"
+        is_enterprise = true
+        auth_enabled  = false
+
+        dynamic "values" {
+          for_each = faults.value.values
+          content {
+            name  = values.value.name
+            value = values.value.value
+          }
+        }
+      }
+    }
+
+    dynamic "probes" {
+      for_each = each.value.probes
+      content {
+        identity      = probes.value.identity
+        name          = probes.value.name
+        is_enterprise = false
+        weightage     = 10
+        duration      = probes.value.duration
+
+        dynamic "values" {
+          for_each = try(probes.value.values, [])
+          content {
+            name  = values.value.name
+            value = values.value.value
+          }
+        }
+      }
+    }
+
+    dynamic "actions" {
+      for_each = each.value.actions
+      content {
+        identity               = actions.value.identity
+        name                   = actions.value.name
+        is_enterprise          = false
+        continue_on_completion = false
+
+        dynamic "values" {
+          for_each = actions.value.values
+          content {
+            name  = values.value.name
+            value = values.value.value
+          }
+        }
+      }
+    }
+
+    dynamic "vertices" {
+      for_each = each.value.vertices
+      content {
+        name = vertices.value.name
+
+        start {
+          dynamic "faults" {
+            for_each = try(vertices.value.start.faults, [])
+            content {
+              name = faults.value
+            }
+          }
+
+          dynamic "probes" {
+            for_each = try(vertices.value.start.probes, [])
+            content {
+              name = probes.value
+            }
+          }
+
+          dynamic "actions" {
+            for_each = try(vertices.value.start.actions, [])
+            content {
+              name = actions.value
+            }
+          }
+        }
+
+        end {
+          dynamic "faults" {
+            for_each = try(vertices.value.end.faults, [])
+            content {
+              name = faults.value
+            }
+          }
+
+          dynamic "probes" {
+            for_each = try(vertices.value.end.probes, [])
+            content {
+              name = probes.value
+            }
+          }
+
+          dynamic "actions" {
+            for_each = try(vertices.value.end.actions, [])
+            content {
+              name = actions.value
+            }
+          }
+        }
+      }
+    }
+  }
+
+  depends_on = [data.harness_chaos_hub_v2.org]
 }
 
 # -----------------------------------------------------------------------------
@@ -895,7 +1497,26 @@ resource "harness_chaos_experiment" "from_template" {
   depends_on = [
     harness_chaos_infrastructure_v2.this,
     harness_platform_infrastructure.this,
+    harness_chaos_experiment_template.this,
   ]
+}
+
+output "chaos_hub" {
+  value = var.create_org_chaos_templates ? {
+    identity    = data.harness_chaos_hub_v2.org[0].identity
+    name        = data.harness_chaos_hub_v2.org[0].name
+    hub_ref     = local.chaos_hub_ref
+    import_hint = "Set experiment_hub_identity=${local.chaos_hub_ref}, experiment_hub_org_id=${local.org_identifier}, and experiment_template_identity to a live identity such as txnservicedependencyfailure."
+  } : null
+}
+
+output "chaos_experiment_templates" {
+  value = {
+    for key, tmpl in harness_chaos_experiment_template.this : key => {
+      identity = tmpl.identity
+      name     = tmpl.name
+    }
+  }
 }
 
 output "experiments" {
