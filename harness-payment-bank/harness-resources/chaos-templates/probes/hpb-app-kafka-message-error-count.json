@@ -1,0 +1,49 @@
+{
+  "identity": "hpb-app-kafka-message-error-count",
+  "name": "hpb-app-kafka-message-error-count",
+  "description": "",
+  "hubRef": "__HUB__",
+  "type": "apmProbe",
+  "infrastructureType": "Kubernetes",
+  "tags": [],
+  "probeProperties": {
+    "apmProbe": {
+      "comparator": {
+        "type": "float",
+        "value": "10",
+        "criteria": "<="
+      },
+      "type": "Prometheus",
+      "prometheusProbeInputs": {
+        "connectorID": "<+input>",
+        "query": "sum(increase(kafka_messages_processed_total{status=\\\"error\\\"}[5m]))\n\n",
+        "tlsConfig": {
+          "insecureSkipVerify": true
+        }
+      }
+    }
+  },
+  "runProperties": {
+    "timeout": "10s",
+    "interval": "10s",
+    "attempt": 2,
+    "pollingInterval": "10s",
+    "initialDelay": "1s",
+    "verbosity": "debug"
+  },
+  "variables": [],
+  "inputs": [
+    {
+      "name": "PROMETHEUSPROBEINPUTS_CONNECTORID",
+      "value": "<+input>",
+      "path": ".probeProperties.apmProbe.prometheusProbeInputs.connectorID",
+      "category": "ProbeProperties",
+      "type": "String",
+      "required": true,
+      "reference": {
+        "kind": "Connector",
+        "type": "Prometheus"
+      }
+    }
+  ]
+}

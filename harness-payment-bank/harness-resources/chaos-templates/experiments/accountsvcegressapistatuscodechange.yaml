@@ -1,0 +1,88 @@
+name: account-svc-egress-api-status-code-change
+identity: accountsvcegressapistatuscodechange
+description: Intercepts ingress API calls to the account-service on port 10080 and
+  returns HTTP 500 for 100% of /user path requests for 120s. Validates user account
+  API and transaction health via gateway-service probes.
+tags:
+- hpb
+kind: ChaosExperimentTemplate
+apiVersion: litmuschaos.io/v1beta1
+spec:
+  infraType: KubernetesV2
+  faults:
+  - name: pod-api-status-code-f95
+    identity: pod-api-status-code
+    revision: v1
+    isEnterprise: true
+    values:
+    - name: TARGET_WORKLOAD_KIND
+      value: deployment
+    - name: TARGET_WORKLOAD_NAMES
+      value: account-service
+    - name: TOTAL_CHAOS_DURATION
+      value: 120
+    - name: STATUS_CODE
+      value: 500
+    - name: TARGET_SERVICE_PORT
+      value: 10080
+    - name: TRANSACTION_PERCENTAGE
+      value: 100
+    - name: SERVICE_DIRECTION
+      value: ingress
+    - name: POD_AFFECTED_PERCENTAGE
+      value: 100
+    - name: TARGET_WORKLOAD_NAMESPACE
+      value: <+experiment.variables.TARGET_NAMESPACE>
+    - name: DESTINATION_PORTS
+      value: 80,443,8080
+    - name: PATH_FILTER
+      value: /user
+    authEnabled: true
+  probes:
+  - name: banking-user-api-check-59d-59d
+    identity: banking-user-api-check
+    isEnterprise: false
+    weightage: 10
+    duration: 30s
+    enableDataCollection: false
+    values:
+    - name: URL
+      value: http://gateway-service.<+experiment.variables.TARGET_NAMESPACE>:8080/api/v1/accounts/user/4
+    - name: AUTH_CREDENTIALS
+      value: __BEARER_TOKEN__
+  - name: hpb-transation-svc-health-check-w8x-w8x
+    identity: hpb-transation-svc-health-check
+    isEnterprise: false
+    weightage: 10
+    duration: 30s
+    enableDataCollection: false
+    values:
+    - name: URL
+      value: http://gateway-service.<+experiment.variables.TARGET_NAMESPACE>:8080/api/v1/transactions/account/1?page=0&size=20&sort=createdAt,desc
+    - name: AUTH_CREDENTIALS
+      value: __BEARER_TOKEN__
+  vertices:
+  - name: v-fae
+    start:
+      probes:
+      - name: banking-user-api-check-59d-59d
+      - name: hpb-transation-svc-health-check-w8x-w8x
+      faults:
+      - name: pod-api-status-code-f95
+    end: {}
+  - name: v-end
+    start: {}
+    end:
+      probes:
+      - name: banking-user-api-check-59d-59d
+      - name: hpb-transation-svc-health-check-w8x-w8x
+      faults:
+      - name: pod-api-status-code-f95
+  cleanupPolicy: delete
+variables:
+- name: TARGET_NAMESPACE
+  value: <+input>
+  type: String
+  required: false
+revision: v1
+isDefault: true

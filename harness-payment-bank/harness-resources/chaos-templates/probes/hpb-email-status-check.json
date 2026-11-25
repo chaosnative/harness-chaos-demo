@@ -1,0 +1,50 @@
+{
+  "identity": "hpb-email-status-check",
+  "name": "hpb-email-status-check",
+  "description": "",
+  "hubRef": "__HUB__",
+  "type": "containerProbe",
+  "infrastructureType": "Kubernetes",
+  "tags": [],
+  "probeProperties": {
+    "containerProbe": {
+      "comparator": {
+        "type": "string",
+        "value": "SENT",
+        "criteria": "contains"
+      },
+      "image": "docker.io/aady12/hpb-verify_transaction-probe:0.0.7",
+      "imagePullPolicy": "IfNotPresent",
+      "command": [
+        "/bin/sh",
+        "-c"
+      ],
+      "args": "bash /app/verify_transaction.sh\n\nsleep 5\n\nREF=$(curl -s \\\n  \"$API_ENDPOINT/api/v1/transactions/account/1?page=0&size=1&sort=createdAt,desc\" \\\n  -H \"Authorization: Bearer $TOKEN\" \\\n  | jq -r '.content[0].transactionReference')\n\necho \"Transaction Reference: $REF\"\n\ncurl -s \\\n  \"$API_ENDPOINT/api/v1/notifications/transaction/$REF\" \\\n  -H \"Authorization: Bearer $TOKEN\" \\\n  | jq '.'",
+      "env": [
+        {
+          "name": "API_ENDPOINT",
+          "value": "<+input>"
+        },
+        {
+          "name": "TOKEN",
+          "value": "<+input>"
+        }
+      ],
+      "namespace": "__DELEGATE_NS__",
+      "serviceAccountName": "default",
+      "affinity": {},
+      "hostNetwork": false,
+      "hostPID": false,
+      "hostIPC": false
+    }
+  },
+  "runProperties": {
+    "timeout": "50s",
+    "interval": "5s",
+    "attempt": 1,
+    "pollingInterval": "1s",
+    "initialDelay": "1s",
+    "verbosity": "debug"
+  },
+  "variables": []
+}

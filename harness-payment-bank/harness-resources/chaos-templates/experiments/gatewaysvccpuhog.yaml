@@ -1,0 +1,84 @@
+name: gateway-svc-cpu-hog
+identity: gatewaysvccpuhog
+description: Stress tests the gateway-service deployment by hogging 2 CPU cores at
+  100% load for 120s using CRI-O runtime. Monitors average CPU utilization via Prometheus
+  probe to validate service stability under high CPU pressure.
+tags:
+- hpb
+kind: ChaosExperimentTemplate
+apiVersion: litmuschaos.io/v1beta1
+spec:
+  infraType: KubernetesV2
+  faults:
+  - name: pod-cpu-hog-45f
+    identity: pod-cpu-hog
+    revision: v1
+    isEnterprise: true
+    values:
+    - name: TARGET_WORKLOAD_KIND
+      value: deployment
+    - name: TARGET_WORKLOAD_NAMES
+      value: gateway-service
+    - name: TOTAL_CHAOS_DURATION
+      value: 120
+    - name: POD_AFFECTED_PERCENTAGE
+      value: 100
+    - name: TARGET_WORKLOAD_NAMESPACE
+      value: <+experiment.variables.TARGET_NAMESPACE>
+    - name: CPU_CORES
+      value: 2
+    - name: CPU_LOAD
+      value: 100
+    authEnabled: false
+  probes:
+  - name: avg-cpu-utilization-ty9-ty9
+    identity: avg-cpu-utilization
+    isEnterprise: false
+    weightage: 10
+    duration: 30s
+    enableDataCollection: false
+    values:
+    - name: PROMETHEUSPROBEINPUTS_CONNECTORID
+      value: <+input>
+    - name: VARIABLES_SERVICE_NAME
+      value: gateway-service
+    - name: VARIABLES_NAMESPACE
+      value: <+experiment.variables.TARGET_NAMESPACE>
+  actions:
+  - name: delay-action-template-3vm-3vm
+    identity: delay-action-template
+    isEnterprise: false
+    continueOnCompletion: false
+    values:
+    - name: DURATION
+      value: 30s
+  vertices:
+  - name: v-3xr
+    start:
+      actions:
+      - name: delay-action-template-3vm-3vm
+    end: {}
+  - name: v-46n
+    start:
+      probes:
+      - name: avg-cpu-utilization-ty9-ty9
+      faults:
+      - name: pod-cpu-hog-45f
+    end:
+      actions:
+      - name: delay-action-template-3vm-3vm
+  - name: v-end
+    start: {}
+    end:
+      probes:
+      - name: avg-cpu-utilization-ty9-ty9
+      faults:
+      - name: pod-cpu-hog-45f
+  cleanupPolicy: delete
+variables:
+- name: TARGET_NAMESPACE
+  value: <+input>
+  type: String
+  required: true
+revision: v1
+isDefault: true

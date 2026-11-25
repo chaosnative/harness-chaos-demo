@@ -1,0 +1,115 @@
+name: account-svc-db-failure
+identity: accountsvcdbfailure
+description: 'Simulates database connectivity failure for the account-service by injecting
+  network loss to configurable destination IPs for 120s.
+
+
+  Validates transaction API health and user account API availability via gateway-service
+  probes across multiple pipeline stages.'
+tags:
+- hpb
+kind: ChaosExperimentTemplate
+apiVersion: litmuschaos.io/v1beta1
+spec:
+  infraType: KubernetesV2
+  faults:
+  - name: pod-network-loss-27o
+    identity: pod-network-loss
+    revision: v1
+    isEnterprise: true
+    values:
+    - name: TARGET_WORKLOAD_KIND
+      value: deployment
+    - name: TARGET_WORKLOAD_NAMES
+      value: account-service
+    - name: TOTAL_CHAOS_DURATION
+      value: 120
+    - name: TARGET_WORKLOAD_NAMESPACE
+      value: <+experiment.variables.TARGET_NAMESPACE>
+    - name: DESTINATION_HOSTS
+      value: postgresql.<+experiment.variables.TARGET_NAMESPACE>.svc.cluster.local
+    authEnabled: false
+  probes:
+  - name: hpb-transation-svc-health-check-ne6-ne6
+    identity: hpb-transation-svc-health-check
+    isEnterprise: false
+    weightage: 10
+    duration: 30s
+    enableDataCollection: false
+    values:
+    - name: URL
+      value: http://gateway-service.<+experiment.variables.TARGET_NAMESPACE>:8080/api/v1/transactions/account/1?page=0&size=20&sort=createdAt,desc
+    - name: AUTH_CREDENTIALS
+      value: __BEARER_TOKEN__
+  - name: hpb-transation-svc-health-check-mtn-mtn
+    identity: hpb-transation-svc-health-check
+    isEnterprise: false
+    weightage: 10
+    duration: 30s
+    enableDataCollection: false
+    values:
+    - name: AUTH_CREDENTIALS
+      value: __BEARER_TOKEN__
+    - name: URL
+      value: http://gateway-service.<+experiment.variables.TARGET_NAMESPACE>:8080/api/v1/transactions/account/1?page=0&size=20&sort=createdAt,desc
+  - name: hpb-transation-svc-health-check-2ng-2ng
+    identity: hpb-transation-svc-health-check
+    isEnterprise: false
+    weightage: 10
+    duration: 30s
+    enableDataCollection: false
+    values:
+    - name: URL
+      value: http://gateway-service.<+experiment.variables.TARGET_NAMESPACE>:8080/api/v1/transactions/account/1?page=0&size=20&sort=createdAt,desc
+    - name: AUTH_CREDENTIALS
+      value: __BEARER_TOKEN__
+  - name: banking-user-api-check-fxd-fxd
+    identity: banking-user-api-check
+    isEnterprise: false
+    weightage: 10
+    duration: 30s
+    enableDataCollection: false
+    values:
+    - name: URL
+      value: http://gateway-service.<+experiment.variables.TARGET_NAMESPACE>:8080/api/v1/accounts/user/4
+    - name: AUTH_CREDENTIALS
+      value: __BEARER_TOKEN__
+  vertices:
+  - name: v-nfk
+    start:
+      probes:
+      - name: hpb-transation-svc-health-check-ne6-ne6
+    end: {}
+  - name: v-28y
+    start:
+      probes:
+      - name: hpb-transation-svc-health-check-mtn-mtn
+      - name: banking-user-api-check-fxd-fxd
+      faults:
+      - name: pod-network-loss-27o
+    end:
+      probes:
+      - name: hpb-transation-svc-health-check-ne6-ne6
+  - name: v-2pc
+    start:
+      probes:
+      - name: hpb-transation-svc-health-check-2ng-2ng
+    end:
+      probes:
+      - name: hpb-transation-svc-health-check-mtn-mtn
+      - name: banking-user-api-check-fxd-fxd
+      faults:
+      - name: pod-network-loss-27o
+  - name: v-end
+    start: {}
+    end:
+      probes:
+      - name: hpb-transation-svc-health-check-2ng-2ng
+  cleanupPolicy: delete
+variables:
+- name: TARGET_NAMESPACE
+  value: <+input>
+  type: String
+  required: true
+revision: v1
+isDefault: true

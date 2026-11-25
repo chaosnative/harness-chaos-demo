@@ -37,14 +37,14 @@
 #   https://developer.harness.io/docs/resilience-testing/platform-features/terraform-onboarding
 
 terraform {
-  required_version = ">= 1.8.0"
+  required_version = ">= 1.10.0"
 
   backend "s3" {
-    bucket         = "hpb-demo-tfstate-naren"
-    key            = "hpb-harness/terraform.tfstate"
-    region         = "us-east-1"
-    encrypt        = true
-    dynamodb_table = "hpb-demo-tf-lock"
+    bucket       = "hpb-demo-tfstate-naren"
+    key          = "hpb-harness/terraform.tfstate"
+    region       = "us-east-1"
+    encrypt      = true
+    use_lockfile = true
   }
 
   required_providers {
@@ -71,6 +71,10 @@ terraform {
     null = {
       source  = "hashicorp/null"
       version = "~> 3.2"
+    }
+    external = {
+      source  = "hashicorp/external"
+      version = "~> 2.3"
     }
   }
 }
@@ -206,6 +210,27 @@ locals {
   }
 }
 
+# The namespace list from infrastructure state wins over namespace_count.
+# Fail here when that list is still the old shorter set, and when banking-10
+# would not become team_10 / hpbk8s10. regex [0-9]+$ is what keeps the 10.
+resource "terraform_data" "namespace_layout" {
+  lifecycle {
+    precondition {
+      condition     = !var.manage_team_projects || length(var.namespaces) > 0 || length(local.namespaces) == var.namespace_count
+      error_message = "This root is set for ${var.namespace_count} namespaces, but it will use ${length(local.namespaces)} (${join(", ", local.namespaces)}). Apply infrastructure first so its state lists ${var.namespace_prefix}-1 through ${var.namespace_prefix}-${var.namespace_count}, or pass namespaces explicitly."
+    }
+
+    precondition {
+      condition = !var.manage_team_projects || (!contains(keys(local.projects), "${var.namespace_prefix}-10") ? var.namespace_count < 10 : (
+        local.projects["${var.namespace_prefix}-10"].identifier == "${local.team_prefix_id}_10" &&
+        local.projects["${var.namespace_prefix}-10"].name == "${local.team_prefix_name}-10" &&
+        local.projects["${var.namespace_prefix}-10"].infra_id == "${local.infra_id_stem}10"
+      ))
+      error_message = "${var.namespace_prefix}-10 must be project ${local.team_prefix_id}_10 / ${local.team_prefix_name}-10 with infrastructure ${local.infra_id_stem}10."
+    }
+  }
+}
+
 # -----------------------------------------------------------------------------
 # Organization
 # -----------------------------------------------------------------------------
@@ -217,10 +242,6 @@ resource "harness_platform_organization" "this" {
   name        = local.org_name
   description = var.org_description
   tags        = local.tags
-
-  lifecycle {
-    prevent_destroy = true
-  }
 }
 
 data "harness_platform_organization" "this" {
@@ -230,462 +251,69 @@ data "harness_platform_organization" "this" {
 }
 
 # -----------------------------------------------------------------------------
-# Org ChaosHub + experiment templates
-# Registry: data.harness_chaos_hub_v2 (existing custom-hub-workshop),
-# chaos_experiment_template. Org-scoped: org_id set, project_id omitted.
-# Does not create a ChaosHub, probe template, or action template.
-# Experiment identities/names match PnC and the live workshop hub
-# (e.g. txnservicedependencyfailure). import {} adopts those objects so
-# apply updates them. Per-project harness_chaos_experiment.from_template
-# is still skipped unless experiment_* identities are set.
+# Org ChaosHub copy
+# The hub already exists (custom-hub-workshop). Apply copies faults, probes,
+# actions, and experiment templates from the PnC hub through the chaos API.
+# Tokens stay in memory. It does not delete them. Deleting the organization
+# deletes the hub, so manage_team_projects=false is how projects go away
+# while the org and these templates stay.
 # -----------------------------------------------------------------------------
 
 locals {
   chaos_hub_name = var.chaos_hub_name != "" ? var.chaos_hub_name : var.chaos_hub_identity
   chaos_hub_ref  = "org.${var.chaos_hub_identity}"
+  # Per-project connector id is hpb_prometheus_team_1 (name hpb-prometheus-team-1).
+  # Org hub templates cannot bake one of those IDs. PnC kafka probes use <+input>;
+  # workshop avg-cpu does the same because Prometheus is project-scoped.
+  chaos_prom_connector = "<+input>"
 
-  # Existing probe/action identities in custom-hub-workshop (do not create new ones).
-  chaos_probe_txn_id  = "hpb-transation-svc-health-check"
-  chaos_probe_user_id = "banking-user-api-check"
-  chaos_delay_id      = "delay-action-template"
+  # Team projects are destroyed by apply when this is false. The org and the
+  # chaos templates stay. See manage_team_projects.
+  active_projects = var.manage_team_projects ? local.projects : {}
 
-  # TARGET_NAMESPACE picker: only banking-i for project team_i.
-  # Probe/fault DNS cannot use experiment.variables (provider spec has no
-  # variables block), so those strings derive the same namespace from the project.
-  chaos_ns_from_project = "<+replace(<+project.identifier>,\"team_\",\"banking-\")>"
-  chaos_ns_input        = "<+input>.allowedValues(<+replace(<+project.identifier>,\"team_\",\"banking-\")>)"
-  chaos_ns              = local.chaos_ns_input
-  chaos_gateway_dns     = "gateway-service.<+replace(<+project.identifier>,\"team_\",\"banking-\")>"
-  chaos_postgres_dns    = "postgresql.<+replace(<+project.identifier>,\"team_\",\"banking-\")>.svc.cluster.local"
-  chaos_url = {
-    gateway_health = "http://gateway-service.<+replace(<+project.identifier>,\"team_\",\"banking-\")>:8080/actuator/health"
-    gateway_txn    = "http://gateway-service.<+replace(<+project.identifier>,\"team_\",\"banking-\")>:8080/api/v1/transactions/account/1?page=0&size=20&sort=createdAt,desc"
-    gateway_user   = "http://gateway-service.<+replace(<+project.identifier>,\"team_\",\"banking-\")>:8080/api/v1/accounts/user/4"
-  }
-  chaos_probe_values = {
-    health = [
-      { name = "URL", value = "http://gateway-service.<+replace(<+project.identifier>,\"team_\",\"banking-\")>:8080/actuator/health" },
-      { name = "AUTH_CREDENTIALS", value = "<+input>" },
-    ]
-    txn = [
-      { name = "URL", value = "http://gateway-service.<+replace(<+project.identifier>,\"team_\",\"banking-\")>:8080/api/v1/transactions/account/1?page=0&size=20&sort=createdAt,desc" },
-      { name = "AUTH_CREDENTIALS", value = "<+input>" },
-    ]
-    user = [
-      { name = "URL", value = "http://gateway-service.<+replace(<+project.identifier>,\"team_\",\"banking-\")>:8080/api/v1/accounts/user/4" },
-      { name = "AUTH_CREDENTIALS", value = "<+input>" },
-    ]
+}
+
+# Harness creates custom-hub-workshop itself when the organization is created.
+# A lookup before that organization exists returns 500 "failed to get chaos hub".
+# This waits until that lookup succeeds, then the data source below reads it.
+resource "null_resource" "chaos_hub_ready" {
+  count = var.create_org_chaos_templates ? 1 : 0
+
+  triggers = {
+    org = local.org_identifier
+    hub = var.chaos_hub_identity
   }
 
-  chaos_experiment_templates = {
-    gateway_pod_delete = {
-      identity    = "gatewayservicepodrestart"
-      name        = "gateway-service-pod-restart"
-      description = "Delete gateway-service pods and check gateway APIs before, during, and after the fault. Namespace is TARGET_NAMESPACE; probe URLs use in-cluster DNS gateway-service.<namespace>."
-      tags        = ["hpb", "gateway", "pod-delete"]
-      faults = [{
-        identity = "pod-delete"
-        name     = "gateway-pod-delete-fault"
-        values = [
-          { name = "TARGET_WORKLOAD_KIND", value = "deployment" },
-          { name = "TARGET_WORKLOAD_NAMES", value = "gateway-service" },
-          { name = "TARGET_WORKLOAD_NAMESPACE", value = local.chaos_ns },
-          { name = "TOTAL_CHAOS_DURATION", value = "120" },
-          { name = "POD_AFFECTED_PERCENTAGE", value = "100" },
-          { name = "CHAOS_INTERVAL", value = "20" },
-        ]
-      }]
-      probes = [
-        {
-          name   = "probe-txn-pre", identity = local.chaos_probe_txn_id, duration = "30s"
-          values = local.chaos_probe_values.txn
-        },
-        {
-          name   = "probe-health", identity = local.chaos_probe_txn_id, duration = "30s"
-          values = local.chaos_probe_values.health
-        },
-        {
-          name   = "probe-user", identity = local.chaos_probe_user_id, duration = "30s"
-          values = local.chaos_probe_values.user
-        },
-        {
-          name   = "probe-txn-post", identity = local.chaos_probe_txn_id, duration = "30s"
-          values = local.chaos_probe_values.txn
-        },
-      ]
-      actions = []
-      vertices = [
-        { name = "pre", start = { probes = ["probe-txn-pre"] }, end = {} },
-        { name = "fault", start = { probes = ["probe-health", "probe-user"], faults = ["gateway-pod-delete-fault"] }, end = { probes = ["probe-txn-pre"] } },
-        { name = "post", start = { probes = ["probe-txn-post"] }, end = { probes = ["probe-health", "probe-user"], faults = ["gateway-pod-delete-fault"] } },
-        { name = "v-end", start = {}, end = { probes = ["probe-txn-post"] } },
-      ]
-    }
-
-    gateway_cpu_hog = {
-      identity    = "gatewaysvccpuhog"
-      name        = "gateway-svc-cpu-hog"
-      description = "CPU hog on gateway-service with a delay action around the fault. HTTP probe uses in-cluster DNS gateway-service.<TARGET_NAMESPACE>."
-      tags        = ["hpb", "gateway", "cpu-hog"]
-      faults = [{
-        identity = "pod-cpu-hog"
-        name     = "gateway-cpu-hog-fault"
-        values = [
-          { name = "TARGET_WORKLOAD_KIND", value = "deployment" },
-          { name = "TARGET_WORKLOAD_NAMES", value = "gateway-service" },
-          { name = "TARGET_WORKLOAD_NAMESPACE", value = local.chaos_ns },
-          { name = "TOTAL_CHAOS_DURATION", value = "120" },
-          { name = "POD_AFFECTED_PERCENTAGE", value = "100" },
-          { name = "CPU_CORES", value = "2" },
-          { name = "CPU_LOAD", value = "100" },
-        ]
-      }]
-      probes = [
-        {
-          name   = "probe-during", identity = local.chaos_probe_txn_id, duration = "30s"
-          values = local.chaos_probe_values.health
-        },
-      ]
-      actions = [{
-        identity = local.chaos_delay_id
-        name     = "delay-30s"
-        values   = [{ name = "DURATION", value = "30s" }]
-      }]
-      vertices = [
-        { name = "pre", start = { actions = ["delay-30s"] }, end = {} },
-        { name = "fault", start = { probes = ["probe-during"], faults = ["gateway-cpu-hog-fault"] }, end = { actions = ["delay-30s"] } },
-        { name = "v-end", start = {}, end = { probes = ["probe-during"], faults = ["gateway-cpu-hog-fault"] } },
-      ]
-    }
-
-    service_pod_delete = {
-      identity    = "servicerestart"
-      name        = "service-restart"
-      description = "Generic pod-delete against a workload name and namespace supplied at import/run time."
-      tags        = ["hpb", "pod-delete"]
-      faults = [{
-        identity = "pod-delete"
-        name     = "service-pod-delete-fault"
-        values = [
-          { name = "TARGET_WORKLOAD_KIND", value = "deployment" },
-          { name = "TARGET_WORKLOAD_NAMES", value = "<+input>" },
-          { name = "TARGET_WORKLOAD_NAMESPACE", value = local.chaos_ns },
-          { name = "TOTAL_CHAOS_DURATION", value = "120" },
-          { name = "POD_AFFECTED_PERCENTAGE", value = "100" },
-          { name = "CHAOS_INTERVAL", value = "20" },
-        ]
-      }]
-      probes = [
-        {
-          name   = "probe-pre", identity = local.chaos_probe_txn_id, duration = "30s"
-          values = local.chaos_probe_values.health
-        },
-        {
-          name   = "probe-during", identity = local.chaos_probe_txn_id, duration = "30s"
-          values = local.chaos_probe_values.txn
-        },
-        {
-          name   = "probe-post", identity = local.chaos_probe_txn_id, duration = "30s"
-          values = local.chaos_probe_values.txn
-        },
-      ]
-      actions = []
-      vertices = [
-        { name = "pre", start = { probes = ["probe-pre"] }, end = {} },
-        { name = "fault", start = { probes = ["probe-during"], faults = ["service-pod-delete-fault"] }, end = { probes = ["probe-pre"] } },
-        { name = "post", start = { probes = ["probe-post"] }, end = { probes = ["probe-during"], faults = ["service-pod-delete-fault"] } },
-        { name = "v-end", start = {}, end = { probes = ["probe-post"] } },
-      ]
-    }
-
-    transaction_sql_exception = {
-      identity    = "transactionsqlinjectexception"
-      name        = "transaction-sql-inject-exception"
-      description = "JVM SQL exception on transaction-service SELECT against the transactions table (Hibernate)."
-      tags        = ["hpb", "transaction-service", "jvm"]
-      faults = [{
-        identity = "pod-jvm-sql-exception"
-        name     = "txn-sql-exception-fault"
-        values = [
-          { name = "TARGET_WORKLOAD_KIND", value = "deployment" },
-          { name = "TARGET_WORKLOAD_NAMES", value = "transaction-service" },
-          { name = "TARGET_WORKLOAD_NAMESPACE", value = local.chaos_ns },
-          { name = "TOTAL_CHAOS_DURATION", value = "120" },
-          { name = "TABLE", value = "transactions" },
-          { name = "SQL_OPERATION", value = "select" },
-          { name = "SQL_DATA_ACCESS_FRAMEWORK", value = "HIBERNATE" },
-        ]
-      }]
-      probes = [
-        {
-          name   = "probe-pre", identity = local.chaos_probe_txn_id, duration = "30s"
-          values = local.chaos_probe_values.txn
-        },
-        {
-          name   = "probe-during", identity = local.chaos_probe_txn_id, duration = "30s"
-          values = local.chaos_probe_values.txn
-        },
-        {
-          name   = "probe-post", identity = local.chaos_probe_txn_id, duration = "30s"
-          values = local.chaos_probe_values.txn
-        },
-      ]
-      actions = []
-      vertices = [
-        { name = "pre", start = { probes = ["probe-pre"] }, end = {} },
-        { name = "fault", start = { probes = ["probe-during"], faults = ["txn-sql-exception-fault"] }, end = { probes = ["probe-pre"] } },
-        { name = "post", start = { probes = ["probe-post"] }, end = { probes = ["probe-during"], faults = ["txn-sql-exception-fault"] } },
-        { name = "v-end", start = {}, end = { probes = ["probe-post"] } },
-      ]
-    }
-
-    transaction_network_loss = {
-      identity    = "txnservicedependencyfailure"
-      name        = "txn-service-dependency-failure"
-      description = "Block transaction-service traffic to gateway-service (dependency failure)."
-      tags        = ["hpb", "transaction-service", "network"]
-      faults = [{
-        identity = "pod-network-loss"
-        name     = "txn-network-loss-fault"
-        values = [
-          { name = "TARGET_WORKLOAD_KIND", value = "deployment" },
-          { name = "TARGET_WORKLOAD_NAMES", value = "transaction-service" },
-          { name = "TARGET_WORKLOAD_NAMESPACE", value = local.chaos_ns },
-          { name = "TOTAL_CHAOS_DURATION", value = "120" },
-          { name = "POD_AFFECTED_PERCENTAGE", value = "100" },
-          { name = "DESTINATION_HOSTS", value = local.chaos_gateway_dns },
-        ]
-      }]
-      probes = [
-        {
-          name   = "probe-pre", identity = local.chaos_probe_txn_id, duration = "30s"
-          values = local.chaos_probe_values.txn
-        },
-        {
-          name   = "probe-during", identity = local.chaos_probe_txn_id, duration = "30s"
-          values = local.chaos_probe_values.txn
-        },
-        {
-          name   = "probe-post", identity = local.chaos_probe_txn_id, duration = "30s"
-          values = local.chaos_probe_values.txn
-        },
-      ]
-      actions = []
-      vertices = [
-        { name = "pre", start = { probes = ["probe-pre"] }, end = {} },
-        { name = "fault", start = { probes = ["probe-during"], faults = ["txn-network-loss-fault"] }, end = { probes = ["probe-pre"] } },
-        { name = "post", start = { probes = ["probe-post"] }, end = { probes = ["probe-during"], faults = ["txn-network-loss-fault"] } },
-        { name = "v-end", start = {}, end = { probes = ["probe-post"] } },
-      ]
-    }
-
-    account_db_network_loss = {
-      identity    = "accountsvcdbfailure"
-      name        = "account-svc-db-failure"
-      description = "Network loss from account-service to PostgreSQL at postgresql.<TARGET_NAMESPACE>.svc.cluster.local."
-      tags        = ["hpb", "account-service", "network"]
-      faults = [{
-        identity = "pod-network-loss"
-        name     = "account-db-network-loss-fault"
-        values = [
-          { name = "TARGET_WORKLOAD_KIND", value = "deployment" },
-          { name = "TARGET_WORKLOAD_NAMES", value = "account-service" },
-          { name = "TARGET_WORKLOAD_NAMESPACE", value = local.chaos_ns },
-          { name = "TOTAL_CHAOS_DURATION", value = "120" },
-          { name = "DESTINATION_HOSTS", value = local.chaos_postgres_dns },
-        ]
-      }]
-      probes = [
-        {
-          name   = "probe-pre", identity = local.chaos_probe_txn_id, duration = "30s"
-          values = local.chaos_probe_values.txn
-        },
-        {
-          name   = "probe-during", identity = local.chaos_probe_txn_id, duration = "30s"
-          values = local.chaos_probe_values.user
-        },
-        {
-          name   = "probe-post", identity = local.chaos_probe_txn_id, duration = "30s"
-          values = local.chaos_probe_values.txn
-        },
-      ]
-      actions = []
-      vertices = [
-        { name = "pre", start = { probes = ["probe-pre"] }, end = {} },
-        { name = "fault", start = { probes = ["probe-during"], faults = ["account-db-network-loss-fault"] }, end = { probes = ["probe-pre"] } },
-        { name = "post", start = { probes = ["probe-post"] }, end = { probes = ["probe-during"], faults = ["account-db-network-loss-fault"] } },
-        { name = "v-end", start = {}, end = { probes = ["probe-post"] } },
-      ]
-    }
-
-    account_jvm_method_exception = {
-      identity    = "accountsvcjavamethodexception"
-      name        = "account-svc-java-method-exception"
-      description = "NullPointerException on AccountService.getAccountsByUserId in account-service."
-      tags        = ["hpb", "account-service", "jvm"]
-      faults = [{
-        identity = "pod-jvm-method-exception"
-        name     = "account-jvm-method-fault"
-        values = [
-          { name = "TARGET_WORKLOAD_KIND", value = "deployment" },
-          { name = "TARGET_WORKLOAD_NAMES", value = "account-service" },
-          { name = "TARGET_WORKLOAD_NAMESPACE", value = local.chaos_ns },
-          { name = "TOTAL_CHAOS_DURATION", value = "120" },
-          { name = "POD_AFFECTED_PERCENTAGE", value = "100" },
-          { name = "CLASS", value = "com.example.account.service.AccountService" },
-          { name = "METHOD", value = "getAccountsByUserId" },
-          { name = "EXCEPTION", value = "NullPointerException(\"Hello, NullPointerException!\")" },
-        ]
-      }]
-      probes = [
-        {
-          name   = "probe-pre", identity = local.chaos_probe_txn_id, duration = "30s"
-          values = local.chaos_probe_values.txn
-        },
-        {
-          name   = "probe-during", identity = local.chaos_probe_txn_id, duration = "30s"
-          values = local.chaos_probe_values.user
-        },
-        {
-          name   = "probe-post", identity = local.chaos_probe_txn_id, duration = "30s"
-          values = local.chaos_probe_values.txn
-        },
-      ]
-      actions = []
-      vertices = [
-        { name = "pre", start = { probes = ["probe-pre"] }, end = {} },
-        { name = "fault", start = { probes = ["probe-during"], faults = ["account-jvm-method-fault"] }, end = { probes = ["probe-pre"] } },
-        { name = "post", start = { probes = ["probe-post"] }, end = { probes = ["probe-during"], faults = ["account-jvm-method-fault"] } },
-        { name = "v-end", start = {}, end = { probes = ["probe-post"] } },
-      ]
-    }
-
-    account_api_status_code = {
-      identity    = "accountsvcegressapistatuscodechange"
-      name        = "account-svc-egress-api-status-code-change"
-      description = "Force HTTP 500 on account-service ingress /user for 100% of traffic."
-      tags        = ["hpb", "account-service", "http"]
-      faults = [{
-        identity = "pod-api-status-code"
-        name     = "account-api-status-fault"
-        values = [
-          { name = "TARGET_WORKLOAD_KIND", value = "deployment" },
-          { name = "TARGET_WORKLOAD_NAMES", value = "account-service" },
-          { name = "TARGET_WORKLOAD_NAMESPACE", value = local.chaos_ns },
-          { name = "TOTAL_CHAOS_DURATION", value = "120" },
-          { name = "STATUS_CODE", value = "500" },
-          { name = "TARGET_SERVICE_PORT", value = "10080" },
-          { name = "TRANSACTION_PERCENTAGE", value = "100" },
-          { name = "SERVICE_DIRECTION", value = "ingress" },
-          { name = "POD_AFFECTED_PERCENTAGE", value = "100" },
-        ]
-      }]
-      probes = [
-        {
-          name   = "probe-pre", identity = local.chaos_probe_txn_id, duration = "30s"
-          values = local.chaos_probe_values.user
-        },
-        {
-          name   = "probe-during", identity = local.chaos_probe_txn_id, duration = "30s"
-          values = local.chaos_probe_values.user
-        },
-        {
-          name   = "probe-post", identity = local.chaos_probe_txn_id, duration = "30s"
-          values = local.chaos_probe_values.txn
-        },
-      ]
-      actions = []
-      vertices = [
-        { name = "pre", start = { probes = ["probe-pre"] }, end = {} },
-        { name = "fault", start = { probes = ["probe-during"], faults = ["account-api-status-fault"] }, end = { probes = ["probe-pre"] } },
-        { name = "post", start = { probes = ["probe-post"] }, end = { probes = ["probe-during"], faults = ["account-api-status-fault"] } },
-        { name = "v-end", start = {}, end = { probes = ["probe-post"] } },
-      ]
-    }
-
-    notification_mongo_exception = {
-      identity    = "emailservicemongoexception"
-      name        = "emailservice-mongo-exception"
-      description = "JVM Mongo exception on notification-service collection notification_logs."
-      tags        = ["hpb", "notification-service", "jvm"]
-      faults = [{
-        identity = "pod-jvm-mongo-exception"
-        name     = "notification-mongo-fault"
-        values = [
-          { name = "TARGET_WORKLOAD_KIND", value = "deployment" },
-          { name = "TARGET_WORKLOAD_NAMES", value = "notification-service" },
-          { name = "TARGET_WORKLOAD_NAMESPACE", value = local.chaos_ns },
-          { name = "TOTAL_CHAOS_DURATION", value = "120" },
-          { name = "DATABASE", value = "notification" },
-          { name = "COLLECTION", value = "notification_logs" },
-          { name = "TRANSACTION_PERCENTAGE", value = "100" },
-          { name = "POD_AFFECTED_PERCENTAGE", value = "100" },
-        ]
-      }]
-      probes = [
-        {
-          name   = "probe-pre", identity = local.chaos_probe_txn_id, duration = "30s"
-          values = local.chaos_probe_values.txn
-        },
-        {
-          name   = "probe-during", identity = local.chaos_probe_txn_id, duration = "30s"
-          values = local.chaos_probe_values.txn
-        },
-        {
-          name   = "probe-post", identity = local.chaos_probe_txn_id, duration = "30s"
-          values = local.chaos_probe_values.txn
-        },
-      ]
-      actions = []
-      vertices = [
-        { name = "pre", start = { probes = ["probe-pre"] }, end = {} },
-        { name = "fault", start = { probes = ["probe-during"], faults = ["notification-mongo-fault"] }, end = { probes = ["probe-pre"] } },
-        { name = "post", start = { probes = ["probe-post"] }, end = { probes = ["probe-during"], faults = ["notification-mongo-fault"] } },
-        { name = "v-end", start = {}, end = { probes = ["probe-post"] } },
-      ]
-    }
-
-    validator_kafka_exception = {
-      identity    = "kafkaexceptioninpaymentvalidatorservice"
-      name        = "kafka-exception-in-payment-validator-service"
-      description = "JVM Kafka exception on validator-service topic transfer."
-      tags        = ["hpb", "validator-service", "jvm"]
-      faults = [{
-        identity = "pod-jvm-kafka-exception"
-        name     = "validator-kafka-fault"
-        values = [
-          { name = "TARGET_WORKLOAD_KIND", value = "deployment" },
-          { name = "TARGET_WORKLOAD_NAMES", value = "validator-service" },
-          { name = "TARGET_WORKLOAD_NAMESPACE", value = local.chaos_ns },
-          { name = "TOTAL_CHAOS_DURATION", value = "120" },
-          { name = "KAFKA_TOPIC", value = "transfer" },
-          { name = "TRANSACTION_PERCENTAGE", value = "100" },
-          { name = "POD_AFFECTED_PERCENTAGE", value = "100" },
-        ]
-      }]
-      probes = [
-        {
-          name   = "probe-pre", identity = local.chaos_probe_txn_id, duration = "30s"
-          values = local.chaos_probe_values.txn
-        },
-        {
-          name   = "probe-during", identity = local.chaos_probe_txn_id, duration = "30s"
-          values = local.chaos_probe_values.txn
-        },
-        {
-          name   = "probe-post", identity = local.chaos_probe_txn_id, duration = "30s"
-          values = local.chaos_probe_values.txn
-        },
-      ]
-      actions = []
-      vertices = [
-        { name = "pre", start = { probes = ["probe-pre"] }, end = {} },
-        { name = "fault", start = { probes = ["probe-during"], faults = ["validator-kafka-fault"] }, end = { probes = ["probe-pre"] } },
-        { name = "post", start = { probes = ["probe-post"] }, end = { probes = ["probe-during"], faults = ["validator-kafka-fault"] } },
-        { name = "v-end", start = {}, end = { probes = ["probe-post"] } },
-      ]
-    }
+  provisioner "local-exec" {
+    interpreter = ["/bin/bash", "-c"]
+    command     = <<-EOT
+      set -euo pipefail
+      KEY="$${HARNESS_PLATFORM_API_KEY:-$${HARNESS_API_KEY:-}}"
+      if [ -z "$KEY" ]; then
+        echo "Set HARNESS_PLATFORM_API_KEY or HARNESS_API_KEY before reading the chaos hub."
+        exit 1
+      fi
+      ENDPOINT=${jsonencode(var.harness_gateway_endpoint)}
+      ENDPOINT="$${ENDPOINT%/}"
+      ACCT=${jsonencode(var.account_id)}
+      ORG=${jsonencode(local.org_identifier)}
+      HUB=${jsonencode(var.chaos_hub_identity)}
+      URL="$ENDPOINT/chaos/manager/api/rest/hubs/$HUB?accountIdentifier=$ACCT&organizationIdentifier=$ORG"
+      for i in $(seq 1 30); do
+        code=$(curl -s -o /dev/null -w "%%{http_code}" "$URL" -H "x-api-key: $KEY" || echo 000)
+        if [ "$code" = "200" ]; then
+          echo "Chaos hub $HUB is ready in $ORG"
+          exit 0
+        fi
+        echo "Waiting for chaos hub $HUB (HTTP $code)"
+        sleep 2
+      done
+      echo "Chaos hub $HUB was not readable in $ORG"
+      exit 1
+    EOT
   }
+
+  depends_on = [harness_platform_organization.this]
 }
 
 data "harness_chaos_hub_v2" "org" {
@@ -693,139 +321,311 @@ data "harness_chaos_hub_v2" "org" {
 
   org_id   = local.org_identifier
   identity = var.chaos_hub_identity
+
+  depends_on = [null_resource.chaos_hub_ready]
 }
 
-import {
-  for_each = var.create_org_chaos_templates && var.adopt_existing_org_chaos_templates ? local.chaos_experiment_templates : {}
-  to       = harness_chaos_experiment_template.this[each.key]
-  id       = "${local.org_identifier}/${var.chaos_hub_identity}/${each.value.identity}"
-}
+# Copy the live PnC ChaosHub onto custom-hub-workshop. Destroy does not
+# delete the copied objects. Deleting the organization would, because the
+# hub is removed with the org. Use manage_team_projects = false instead.
+resource "terraform_data" "chaos_templates" {
+  count = var.create_org_chaos_templates ? 1 : 0
 
-resource "harness_chaos_experiment_template" "this" {
-  for_each = var.create_org_chaos_templates ? local.chaos_experiment_templates : {}
+  triggers_replace = {
+    script      = filesha256("${path.module}/sync_chaos_templates.py")
+    hub         = var.chaos_hub_identity
+    org         = local.org_identifier
+    source_org  = var.source_chaos_org_id
+    source_hub  = var.source_chaos_hub_identity
+  }
 
-  org_id       = local.org_identifier
-  hub_identity = data.harness_chaos_hub_v2.org[0].identity
-  identity     = each.value.identity
-  name         = each.value.name
-  description  = each.value.description
-  tags         = concat(local.tags, each.value.tags)
-
-  spec {
-    infra_type     = "KubernetesV2"
-    cleanup_policy = "delete"
-
-    dynamic "faults" {
-      for_each = each.value.faults
-      content {
-        identity      = faults.value.identity
-        name          = faults.value.name
-        revision      = "v1"
-        is_enterprise = true
-        auth_enabled  = false
-
-        dynamic "values" {
-          for_each = faults.value.values
-          content {
-            name  = values.value.name
-            value = values.value.value
-          }
-        }
-      }
-    }
-
-    dynamic "probes" {
-      for_each = each.value.probes
-      content {
-        identity      = probes.value.identity
-        name          = probes.value.name
-        is_enterprise = false
-        weightage     = 10
-        duration      = probes.value.duration
-
-        dynamic "values" {
-          for_each = try(probes.value.values, [])
-          content {
-            name  = values.value.name
-            value = values.value.value
-          }
-        }
-      }
-    }
-
-    dynamic "actions" {
-      for_each = each.value.actions
-      content {
-        identity               = actions.value.identity
-        name                   = actions.value.name
-        is_enterprise          = false
-        continue_on_completion = false
-
-        dynamic "values" {
-          for_each = actions.value.values
-          content {
-            name  = values.value.name
-            value = values.value.value
-          }
-        }
-      }
-    }
-
-    dynamic "vertices" {
-      for_each = each.value.vertices
-      content {
-        name = vertices.value.name
-
-        start {
-          dynamic "faults" {
-            for_each = try(vertices.value.start.faults, [])
-            content {
-              name = faults.value
-            }
-          }
-
-          dynamic "probes" {
-            for_each = try(vertices.value.start.probes, [])
-            content {
-              name = probes.value
-            }
-          }
-
-          dynamic "actions" {
-            for_each = try(vertices.value.start.actions, [])
-            content {
-              name = actions.value
-            }
-          }
-        }
-
-        end {
-          dynamic "faults" {
-            for_each = try(vertices.value.end.faults, [])
-            content {
-              name = faults.value
-            }
-          }
-
-          dynamic "probes" {
-            for_each = try(vertices.value.end.probes, [])
-            content {
-              name = probes.value
-            }
-          }
-
-          dynamic "actions" {
-            for_each = try(vertices.value.end.actions, [])
-            content {
-              name = actions.value
-            }
-          }
-        }
-      }
+  provisioner "local-exec" {
+    command = "python3 ${path.module}/sync_chaos_templates.py"
+    environment = {
+      HARNESS_ACCOUNT_ID   = var.account_id
+      HARNESS_ORG_ID       = local.org_identifier
+      HARNESS_HUB_IDENTITY = var.chaos_hub_identity
+      HARNESS_ENDPOINT     = var.harness_gateway_endpoint
+      SOURCE_ORG_ID        = var.source_chaos_org_id
+      SOURCE_HUB           = var.source_chaos_hub_identity
     }
   }
 
   depends_on = [data.harness_chaos_hub_v2.org]
+}
+
+# Drop the provider-managed copies without deleting the hub objects. The
+# sync above owns them. A destroy of these resources would wipe the templates
+# the workshop keeps when projects are removed.
+removed {
+  from = harness_chaos_experiment_template.this
+  lifecycle {
+    destroy = false
+  }
+}
+
+removed {
+  from = harness_chaos_probe_template.http
+  lifecycle {
+    destroy = false
+  }
+}
+
+removed {
+  from = harness_chaos_probe_template.prom
+  lifecycle {
+    destroy = false
+  }
+}
+
+removed {
+  from = harness_chaos_action_template.delay
+  lifecycle {
+    destroy = false
+  }
+}
+
+# Destroyed before templates, environments, and connectors. Harness rejects
+# those deletes while a project experiment, chaos infrastructure, or discovery
+# agent still points at them. The list payloads do not use "identity" for the
+# id that DELETE accepts: experiments use experimentID, chaos infrastructures
+# use environmentID + identity. CD infrastructures stay for the provider so a
+# second delete does not 404; the environment provisioner removes any orphan
+# the provider no longer has in state.
+resource "null_resource" "chaos_experiments_in_projects" {
+  triggers = {
+    endpoint = var.harness_gateway_endpoint
+    account  = var.account_id
+    org      = local.org_identifier
+    projects = join(" ", [for p in local.active_projects : p.identifier])
+  }
+
+  # Destroyed first, including after an aborted destroy. Same names are deleted
+  # again; a 404 means that object is already gone.
+  depends_on = [
+    harness_platform_project.this,
+    terraform_data.chaos_templates,
+    harness_service_discovery_agent.agent,
+    harness_platform_infrastructure.this,
+    harness_platform_environment.this,
+    harness_platform_connector_kubernetes.eks,
+  ]
+
+  provisioner "local-exec" {
+    when        = destroy
+    interpreter = ["/bin/bash", "-c"]
+    command     = <<-EOT
+      set -euo pipefail
+      KEY="$${HARNESS_PLATFORM_API_KEY:-$${HARNESS_API_KEY:-}}"
+      if [ -z "$KEY" ]; then
+        echo "Set HARNESS_PLATFORM_API_KEY or HARNESS_API_KEY so project resources can be deleted in order."
+        exit 1
+      fi
+      ENDPOINT="${self.triggers.endpoint}"
+      ENDPOINT="$${ENDPOINT%/}"
+      ACCT="${self.triggers.account}"
+      ORG="${self.triggers.org}"
+      CHAOS="$ENDPOINT/chaos/manager/api"
+      SD="$ENDPOINT/servicediscovery"
+      NG="$ENDPOINT/ng/api"
+      SCOPE="$${TMPDIR:-/tmp}/hpb-$${ORG}-destroy-scope"
+      umask 077
+      printf 'endpoint=%s\naccount=%s\norg=%s\n' "$ENDPOINT" "$ACCT" "$ORG" > "$SCOPE"
+
+      http() {
+        local method="$1" url="$2" body="$${3:-}" tmp code
+        tmp=$(mktemp)
+        if [ -n "$body" ]; then
+          code=$(curl -sS -o "$tmp" -w "%%{http_code}" -X "$method" "$url" \
+            -H "x-api-key: $KEY" -H "Content-Type: application/json" -d "$body" || echo 000)
+        else
+          code=$(curl -sS -o "$tmp" -w "%%{http_code}" -X "$method" "$url" \
+            -H "x-api-key: $KEY" -H "Content-Type: application/json" || echo 000)
+        fi
+        HTTP_CODE="$code"
+        HTTP_BODY=$(cat "$tmp")
+        rm -f "$tmp"
+      }
+
+      gone() {
+        case "$HTTP_CODE" in
+          200|201|204|404) return 0 ;;
+        esac
+        printf '%s' "$HTTP_BODY" | grep -qiE 'not found|does not exist|already deleted|no matching' && return 0
+        return 1
+      }
+
+      parse() {
+        printf '%s' "$1" | python3 -c "$2"
+      }
+
+      for PROJ in ${self.triggers.projects}; do
+        echo "Removing experiments, chaos infrastructures, and discovery agents in $ORG/$PROJ"
+        Q="accountIdentifier=$ACCT&organizationIdentifier=$ORG&projectIdentifier=$PROJ"
+        ok=0
+        for round in 1 2 3 4 5 6 7 8; do
+          found=0
+
+          http GET "$CHAOS/rest/v2/experiment?$Q&page=0&limit=100"
+          if [ "$HTTP_CODE" != "200" ] && [ "$HTTP_CODE" != "404" ]; then
+            echo "Could not list experiments in $ORG/$PROJ (HTTP $HTTP_CODE)"
+            printf '%s\n' "$HTTP_BODY" | head -c 400; echo
+            exit 1
+          fi
+          if [ "$HTTP_CODE" = "404" ]; then HTTP_BODY='{}'; fi
+          IDS=$(parse "$HTTP_BODY" '
+import json,sys
+raw=sys.stdin.read().strip()
+data=json.loads(raw) if raw else {}
+for exp in data.get("data") or []:
+    eid=exp.get("experimentID") or exp.get("experimentId") or exp.get("workflowID") or ""
+    if eid:
+        print(eid)
+')
+          for ID in $IDS; do
+            found=1
+            echo "Stopping experiment $ID"
+            http POST "$CHAOS/rest/v2/experiment/$ID/stop?$Q" "{}"
+            echo "Deleting experiment $ID"
+            http DELETE "$CHAOS/rest/v2/experiment/$ID?$Q"
+            if ! gone; then
+              echo "Could not delete experiment $ID (HTTP $HTTP_CODE)"
+              printf '%s\n' "$HTTP_BODY" | head -c 400; echo
+            fi
+          done
+
+          http GET "$NG/environmentsV2?accountIdentifier=$ACCT&orgIdentifier=$ORG&projectIdentifier=$PROJ&size=100"
+          if [ "$HTTP_CODE" != "200" ] && [ "$HTTP_CODE" != "404" ]; then
+            echo "Could not list environments in $ORG/$PROJ (HTTP $HTTP_CODE)"
+            printf '%s\n' "$HTTP_BODY" | head -c 400; echo
+            exit 1
+          fi
+          if [ "$HTTP_CODE" = "404" ]; then HTTP_BODY='{}'; fi
+          ENVS=$(parse "$HTTP_BODY" '
+import json,sys
+raw=sys.stdin.read().strip()
+data=json.loads(raw) if raw else {}
+content=((data.get("data") or {}).get("content")) or []
+for item in content:
+    env=item.get("environment") or item
+    ident=env.get("identifier") or ""
+    if ident:
+        print(ident)
+')
+          # Listing chaos infrastructures without an environment id returns 500
+          # "missing envID". Ask once per environment that still exists.
+          for ENV in $ENVS; do
+            http POST "$CHAOS/rest/v2/infrastructures?$Q&environmentIdentifier=$ENV&envID=$ENV&page=0&limit=100" \
+              "{\"filter\":{\"environmentIDs\":[\"$ENV\"]}}"
+            if [ "$HTTP_CODE" != "200" ] && [ "$HTTP_CODE" != "404" ]; then
+              echo "Could not list chaos infrastructures in $ORG/$PROJ/$ENV (HTTP $HTTP_CODE)"
+              printf '%s\n' "$HTTP_BODY" | head -c 400; echo
+              exit 1
+            fi
+            if [ "$HTTP_CODE" = "404" ]; then HTTP_BODY='{}'; fi
+            ROWS=$(parse "$HTTP_BODY" '
+import json,sys
+raw=sys.stdin.read().strip()
+data=json.loads(raw) if raw else {}
+for inf in data.get("infras") or []:
+    ident=inf.get("identity") or inf.get("infraID") or ""
+    env=inf.get("environmentID") or inf.get("environmentIdentifier") or ""
+    if ident and env:
+        print(env + "\t" + ident)
+')
+            while IFS= read -r row; do
+              [ -n "$row" ] || continue
+              CENV="$${row%%$'\t'*}"
+              ID="$${row#*$'\t'}"
+              echo "Deleting chaos infrastructure $ID in environment $CENV"
+              http DELETE "$CHAOS/rest/v2/infrastructure/$CENV/$ID?$Q"
+              if gone; then
+                continue
+              fi
+              # DDCR records are the CD infrastructure. Chaos DELETE answers 500
+              # "could not verify whether this infrastructure is managed by
+              # Harness" for them. hpbk8sN is deleted by Terraform. Any other
+              # infrastructure in the project is removed here so the project can go.
+              if printf '%s' "$HTTP_BODY" | grep -qiE 'managed by Harness|could not verify|not a k8s infra|no matching infra'; then
+                MANAGED="hpbk8s$${PROJ#team_}"
+                if [ "$ID" = "$MANAGED" ]; then
+                  echo "Leaving $ID for the infrastructure delete"
+                  continue
+                fi
+                echo "Deleting CD infrastructure $ID in $CENV"
+                http DELETE "$NG/infrastructures/$ID?accountIdentifier=$ACCT&orgIdentifier=$ORG&projectIdentifier=$PROJ&environmentIdentifier=$CENV"
+                if ! gone; then
+                  echo "Could not delete CD infrastructure $ID (HTTP $HTTP_CODE)"
+                  printf '%s\n' "$HTTP_BODY" | head -c 400; echo
+                  found=1
+                fi
+                continue
+              fi
+              echo "Could not delete chaos infrastructure $ID (HTTP $HTTP_CODE)"
+              printf '%s\n' "$HTTP_BODY" | head -c 400; echo
+              found=1
+            done < <(printf '%s\n' "$ROWS")
+
+            http GET "$SD/api/v1/agents?$Q&environmentIdentifier=$ENV&page=0&limit=100&all=true"
+            if [ "$HTTP_CODE" != "200" ] && [ "$HTTP_CODE" != "404" ]; then
+              echo "Could not list discovery agents in $ORG/$PROJ/$ENV (HTTP $HTTP_CODE)"
+              printf '%s\n' "$HTTP_BODY" | head -c 400; echo
+              exit 1
+            fi
+            if [ "$HTTP_CODE" != "200" ]; then HTTP_BODY='{}'; fi
+            AGENTS=$(parse "$HTTP_BODY" '
+import json,sys
+raw=sys.stdin.read().strip()
+data=json.loads(raw) if raw else {}
+items=data.get("items") or data.get("data") or []
+if isinstance(items, dict):
+    items=items.get("content") or items.get("items") or []
+for agent in items:
+    if not isinstance(agent, dict) or agent.get("removed"):
+        continue
+    ident=agent.get("identity") or ""
+    if ident:
+        print(ident)
+')
+            for ID in $AGENTS; do
+              found=1
+              echo "Deleting discovery agent $ID in environment $ENV"
+              http DELETE "$SD/api/v1/agents/$ID?$Q&environmentIdentifier=$ENV"
+              if ! gone; then
+                echo "Could not delete discovery agent $ID (HTTP $HTTP_CODE)"
+                printf '%s\n' "$HTTP_BODY" | head -c 400; echo
+              fi
+            done
+          done
+
+          for ENV in $ENVS; do
+            if [ "$ENV" = "hpb" ]; then
+              continue
+            fi
+            echo "Deleting environment $ENV in $ORG/$PROJ"
+            http DELETE "$NG/environmentsV2/$ENV?accountIdentifier=$ACCT&orgIdentifier=$ORG&projectIdentifier=$PROJ"
+            if ! gone; then
+              echo "Could not delete environment $ENV (HTTP $HTTP_CODE)"
+              printf '%s\n' "$HTTP_BODY" | head -c 400; echo
+              found=1
+            fi
+          done
+
+          if [ "$found" -eq 0 ]; then
+            ok=1
+            break
+          fi
+          echo "References remain in $ORG/$PROJ; retry $round"
+          sleep 3
+        done
+        if [ "$ok" -ne 1 ]; then
+          echo "Experiments, chaos infrastructures, or discovery agents are still in $ORG/$PROJ"
+          exit 1
+        fi
+        echo "Project $ORG/$PROJ no longer has experiments, chaos infrastructures, or discovery agents"
+      done
+    EOT
+  }
 }
 
 # -----------------------------------------------------------------------------
@@ -833,7 +633,7 @@ resource "harness_chaos_experiment_template" "this" {
 # -----------------------------------------------------------------------------
 
 resource "harness_platform_project" "this" {
-  for_each = local.projects
+  for_each = local.active_projects
 
   identifier  = each.value.identifier
   name        = each.value.name
@@ -847,6 +647,80 @@ resource "harness_platform_project" "this" {
 # Delegate (account-scoped token + Helm on the EKS cluster)
 # -----------------------------------------------------------------------------
 
+# Fail the plan when the cluster cannot run the delegate. Creating Harness
+# objects and then waiting on a Pending pod leaves the account half-built and
+# does not make the delegate exist. Re-run apply after a node is Ready and a
+# subnet has a free address. Do not destroy.
+data "external" "cluster_schedulable" {
+  program = ["bash", "-c", <<-EOT
+    set -euo pipefail
+    cat >/dev/null
+    REGION=${jsonencode(var.aws_region)}
+    CLUSTER=${jsonencode(local.cluster_name)}
+    cluster_exists=false
+    nodes_known=false
+    ready_nodes=0
+    placeable=true
+    if aws eks describe-cluster --name "$CLUSTER" --region "$REGION" >/dev/null 2>&1; then
+      cluster_exists=true
+      KCFG=$(mktemp)
+      if aws eks update-kubeconfig --kubeconfig "$KCFG" --name "$CLUSTER" --region "$REGION" >/dev/null 2>&1 \
+        && command -v kubectl >/dev/null 2>&1; then
+        KUBECONFIG="$KCFG"
+        export KUBECONFIG
+        if kubectl get ns kube-system >/dev/null 2>&1; then
+          nodes_known=true
+          ready_nodes=$(kubectl get nodes --no-headers 2>/dev/null | awk '$2=="Ready"{c++} END{print c+0}')
+          warm_ip=$(kubectl get ds aws-node -n kube-system -o jsonpath='{range .spec.template.spec.containers[0].env[*]}{.name}={.value}{"\n"}{end}' 2>/dev/null | awk -F= '$1=="WARM_IP_TARGET"{print $2}')
+          warm_ip=$${warm_ip:-unset}
+          placeable=false
+          if [ "$ready_nodes" -gt 0 ]; then
+            if [ "$warm_ip" != "1" ]; then
+              placeable=true
+            else
+              SUBNETS=$(aws ec2 describe-instances --region "$REGION" \
+                --filters "Name=tag:eks:cluster-name,Values=$CLUSTER" "Name=instance-state-name,Values=running" \
+                --query 'Reservations[].Instances[].SubnetId' --output text | tr '\t' '\n' | sort -u)
+              for sn in $SUBNETS; do
+                [ -n "$sn" ] && [ "$sn" != "None" ] || continue
+                avail=$(aws ec2 describe-subnets --region "$REGION" --subnet-ids "$sn" --query 'Subnets[0].AvailableIpAddressCount' --output text 2>/dev/null || echo 0)
+                case "$avail" in
+                  ''|*[!0-9]*) avail=0 ;;
+                esac
+                if [ "$avail" -ge 1 ]; then
+                  placeable=true
+                  break
+                fi
+              done
+            fi
+          fi
+        fi
+      fi
+      rm -f "$KCFG"
+    fi
+    printf '{"cluster_exists":"%s","nodes_known":"%s","ready_nodes":"%s","placeable":"%s"}\n' \
+      "$cluster_exists" "$nodes_known" "$ready_nodes" "$placeable"
+  EOT
+  ]
+}
+
+resource "terraform_data" "cluster_schedulable" {
+  lifecycle {
+    precondition {
+      condition = (
+        data.external.cluster_schedulable.result.nodes_known == "false" ||
+        tonumber(data.external.cluster_schedulable.result.ready_nodes) > 0
+      )
+      error_message = "Every node on ${local.cluster_name} is NotReady, so the delegate cannot be scheduled. Re-run terraform apply after a node is Ready. Do not destroy."
+    }
+
+    precondition {
+      condition     = data.external.cluster_schedulable.result.placeable == "true"
+      error_message = "No Ready node on ${local.cluster_name} can take the delegate's address. The node subnets have no free IP. Free an address and re-run terraform apply. Do not destroy."
+    }
+  }
+}
+
 # ACCOUNT-scoped deliberately: no org_id. The delegate that actually registers
 # was installed from account-level settings
 # (/account/<acct>/module/chaos/settings/delegates/list — note there is no
@@ -855,9 +729,84 @@ resource "harness_platform_project" "this" {
 # with accountId only, and every call came back 401 ACCOUNT_DOES_NOT_EXIST.
 # Removing org_id replaces the token, which is intended: the new value flows
 # into helm_release.delegate and the delegate re-registers.
+# Revoking a token keeps the name for 30 days. Destroy only revokes it, so the
+# next apply deletes that revoked token before creating the same name again.
+resource "null_resource" "delegate_token_name" {
+  triggers = {
+    name    = local.delegate_token_name
+    account = var.account_id
+  }
+
+  provisioner "local-exec" {
+    interpreter = ["/bin/bash", "-c"]
+    command     = <<-EOT
+      set -euo pipefail
+      KEY="$${HARNESS_PLATFORM_API_KEY:-$${HARNESS_API_KEY:-}}"
+      if [ -z "$KEY" ]; then
+        echo "Set HARNESS_PLATFORM_API_KEY or HARNESS_API_KEY before creating the delegate token."
+        exit 1
+      fi
+      ENDPOINT=${jsonencode(var.harness_gateway_endpoint)}
+      ENDPOINT="$${ENDPOINT%/}"
+      ACCT=${jsonencode(var.account_id)}
+      NAME=${jsonencode(local.delegate_token_name)}
+      tmp=$(mktemp)
+      code=$(curl -sS -o "$tmp" -w "%%{http_code}" -X DELETE \
+        "$ENDPOINT/ng/api/delegate-token-ng?accountIdentifier=$ACCT&tokenName=$NAME" \
+        -H "x-api-key: $KEY" || echo 000)
+      if [ "$code" = "200" ] || [ "$code" = "204" ] || [ "$code" = "404" ]; then
+        echo "Delegate token name $NAME is free"
+      elif grep -qi "does not exist" "$tmp"; then
+        echo "Delegate token name $NAME is already free"
+      else
+        echo "Could not remove revoked delegate token $NAME (HTTP $code)"
+        head -c 300 "$tmp"; echo
+        rm -f "$tmp"
+        exit 1
+      fi
+      rm -f "$tmp"
+    EOT
+  }
+
+  # Destroy revokes the token and keeps the name for 30 days. This runs after
+  # that revoke and removes the name, so the next apply is not blocked by it.
+  provisioner "local-exec" {
+    when        = destroy
+    interpreter = ["/bin/bash", "-c"]
+    command     = <<-EOT
+      set -euo pipefail
+      KEY="$${HARNESS_PLATFORM_API_KEY:-$${HARNESS_API_KEY:-}}"
+      if [ -z "$KEY" ]; then
+        echo "Set HARNESS_PLATFORM_API_KEY or HARNESS_API_KEY before deleting the delegate token."
+        exit 1
+      fi
+      ENDPOINT="https://app.harness.io/gateway"
+      ACCT="${self.triggers.account}"
+      NAME="${self.triggers.name}"
+      tmp=$(mktemp)
+      code=$(curl -sS -o "$tmp" -w "%%{http_code}" -X DELETE \
+        "$ENDPOINT/ng/api/delegate-token-ng?accountIdentifier=$ACCT&tokenName=$NAME" \
+        -H "x-api-key: $KEY" || echo 000)
+      if [ "$code" = "200" ] || [ "$code" = "204" ] || [ "$code" = "404" ]; then
+        echo "Delegate token name $NAME is removed"
+      elif grep -qi "does not exist" "$tmp"; then
+        echo "Delegate token name $NAME is already removed"
+      else
+        echo "Could not remove delegate token $NAME (HTTP $code)"
+        head -c 300 "$tmp"; echo
+        rm -f "$tmp"
+        exit 1
+      fi
+      rm -f "$tmp"
+    EOT
+  }
+}
+
 resource "harness_platform_delegatetoken" "this" {
   name       = local.delegate_token_name
   account_id = var.account_id
+
+  depends_on = [null_resource.delegate_token_name]
 }
 
 resource "kubernetes_namespace_v1" "delegate" {
@@ -868,6 +817,44 @@ resource "kubernetes_namespace_v1" "delegate" {
       "app.kubernetes.io/part-of"    = "hpb-workshop"
       "app.kubernetes.io/managed-by" = "terraform"
     }
+  }
+}
+
+# Node subnets are /24. The default VPC CNI warm ENI takes 15 addresses, so a
+# node that still has pod slots can have no free secondary IP, and the delegate
+# stays in ContainerCreating until apply gives up. One warm address is enough
+# for this cluster and lets a new pod take a single IP from the subnet.
+resource "null_resource" "vpc_cni_warm_ip" {
+  triggers = {
+    cluster        = local.cluster_name
+    warm_ip_target = "1"
+  }
+
+  provisioner "local-exec" {
+    interpreter = ["/bin/bash", "-c"]
+    command     = <<-EOT
+      set -euo pipefail
+      CLUSTER=${jsonencode(local.cluster_name)}
+      REGION=${jsonencode(var.aws_region)}
+      KUBECONFIG_FILE=$(mktemp)
+      aws eks update-kubeconfig --region "$REGION" --name "$CLUSTER" --kubeconfig "$KUBECONFIG_FILE"
+      export KUBECONFIG="$KUBECONFIG_FILE"
+      if ! kubectl get ds aws-node -n kube-system >/dev/null 2>&1; then
+        echo "aws-node daemonset is not installed; delegate pods cannot get addresses"
+        rm -f "$KUBECONFIG_FILE"
+        exit 1
+      fi
+      current=$(kubectl get ds aws-node -n kube-system -o jsonpath='{range .spec.template.spec.containers[0].env[*]}{.name}={.value}{"\n"}{end}' | awk -F= '$1=="WARM_IP_TARGET"{print $2}')
+      if [ "$current" = "1" ]; then
+        echo "aws-node WARM_IP_TARGET is already 1"
+        rm -f "$KUBECONFIG_FILE"
+        exit 0
+      fi
+      echo "Setting aws-node WARM_IP_TARGET=1"
+      kubectl set env daemonset/aws-node -n kube-system WARM_IP_TARGET=1
+      kubectl rollout status daemonset/aws-node -n kube-system --timeout=180s
+      rm -f "$KUBECONFIG_FILE"
+    EOT
   }
 }
 
@@ -952,6 +939,8 @@ resource "helm_release" "delegate" {
   depends_on = [
     harness_platform_delegatetoken.this,
     kubernetes_namespace_v1.delegate,
+    null_resource.vpc_cni_warm_ip,
+    terraform_data.cluster_schedulable,
   ]
 }
 
@@ -993,6 +982,10 @@ resource "null_resource" "delegate_ready" {
         if [ "$i" -eq "$RETRIES" ]; then
           echo "Delegate not Ready after $RETRIES attempts on $CLUSTER; re-run terraform apply (do not destroy)"
           kubectl get pods -n "$NS" -l app.kubernetes.io/instance="$NAME" -o wide || true
+          echo "--- nodes ---"
+          kubectl get nodes || true
+          echo "--- scheduling / sandbox ---"
+          kubectl describe pod -n "$NS" -l app.kubernetes.io/instance="$NAME" 2>/dev/null | grep -iE 'FailedScheduling|FailedCreatePodSandBox|untolerated|assign an IP|Successfully assigned' || true
           echo "--- restart count / last termination ---"
           kubectl get pods -n "$NS" -l app.kubernetes.io/instance="$NAME" \
             -o 'jsonpath={range .items[*]}{.metadata.name}{"  restarts="}{.status.containerStatuses[0].restartCount}{"  lastState="}{.status.containerStatuses[0].lastState}{"\n"}{end}' || true
@@ -1024,18 +1017,120 @@ resource "time_sleep" "delegate_register" {
 # -----------------------------------------------------------------------------
 
 resource "harness_platform_connector_kubernetes" "eks" {
-  for_each = local.projects
+  for_each = local.active_projects
 
-  identifier   = local.k8s_connector_id
-  name         = local.k8s_connector_name
-  org_id       = local.org_identifier
-  project_id   = harness_platform_project.this[each.key].identifier
-  description  = "Project Kubernetes connector for namespace ${each.value.namespace} (InheritFromDelegate)."
-  tags         = concat(local.tags, ["namespace:${each.value.namespace}"])
-  force_delete = true
+  identifier  = local.k8s_connector_id
+  name        = local.k8s_connector_name
+  org_id      = local.org_identifier
+  project_id  = harness_platform_project.this[each.key].identifier
+  description = "Project Kubernetes connector for namespace ${each.value.namespace} (InheritFromDelegate)."
+  tags        = concat(local.tags, ["namespace:${each.value.namespace}"])
+  # This account rejects forceDelete. Children are removed first, then a normal delete.
+  force_delete = false
 
   inherit_from_delegate {
     delegate_selectors = [local.delegate_name]
+  }
+
+  # A chaos infrastructure that survived an aborted destroy still names this
+  # connector. Delete those records first. CD infrastructures are removed by
+  # the provider before this connector, because they reference it.
+  provisioner "local-exec" {
+    when        = destroy
+    interpreter = ["/bin/bash", "-c"]
+    command     = <<-EOT
+      set -euo pipefail
+      KEY="$${HARNESS_PLATFORM_API_KEY:-$${HARNESS_API_KEY:-}}"
+      if [ -z "$KEY" ]; then
+        echo "Set HARNESS_PLATFORM_API_KEY or HARNESS_API_KEY so connector ${self.identifier} can be deleted."
+        exit 1
+      fi
+      ORG="${self.org_id}"
+      PROJ="${self.project_id}"
+      SCOPE="$${TMPDIR:-/tmp}/hpb-$${ORG}-destroy-scope"
+      ENDPOINT=""
+      ACCT=""
+      if [ -f "$SCOPE" ]; then
+        ENDPOINT=$(sed -n 's/^endpoint=//p' "$SCOPE")
+        ACCT=$(sed -n 's/^account=//p' "$SCOPE")
+      fi
+      if [ -z "$ACCT" ]; then ACCT="$${HARNESS_ACCOUNT_ID:-}"; fi
+      if [ -z "$ACCT" ]; then ACCT="$${TF_VAR_account_id:-}"; fi
+      # Destroy provisioners cannot read var.account_id. This is that variable's default.
+      if [ -z "$ACCT" ]; then ACCT="cTU1lRSWS2SSRV9phKvuOA"; fi
+      if [ -z "$ENDPOINT" ]; then ENDPOINT="$${HARNESS_ENDPOINT:-https://app.harness.io/gateway}"; fi
+      ENDPOINT="$${ENDPOINT%/}"
+      Q="accountIdentifier=$ACCT&organizationIdentifier=$ORG&projectIdentifier=$PROJ"
+      tmp=$(mktemp)
+      code=$(curl -sS -o "$tmp" -w "%%{http_code}" \
+        "$ENDPOINT/ng/api/environmentsV2?accountIdentifier=$ACCT&orgIdentifier=$ORG&projectIdentifier=$PROJ&size=100" \
+        -H "x-api-key: $KEY" || echo 000)
+      if [ "$code" != "200" ] && [ "$code" != "404" ]; then
+        echo "Could not list environments before deleting connector ${self.identifier} (HTTP $code)"
+        head -c 400 "$tmp"; echo
+        rm -f "$tmp"
+        exit 1
+      fi
+      ENVS=$(python3 -c '
+import json,sys
+raw=sys.stdin.read().strip()
+data=json.loads(raw) if raw.startswith("{") else {}
+content=((data.get("data") or {}).get("content")) or []
+for item in content:
+    env=item.get("environment") or item
+    ident=env.get("identifier") or ""
+    if ident:
+        print(ident)
+' < "$tmp")
+      rm -f "$tmp"
+      ROWS=""
+      for ENV in $ENVS; do
+        tmp=$(mktemp)
+        code=$(curl -sS -o "$tmp" -w "%%{http_code}" -X POST \
+          "$ENDPOINT/chaos/manager/api/rest/v2/infrastructures?$Q&environmentIdentifier=$ENV&envID=$ENV&page=0&limit=100" \
+          -H "x-api-key: $KEY" -H "Content-Type: application/json" \
+          -d "{\"filter\":{\"environmentIDs\":[\"$ENV\"]}}" || echo 000)
+        if [ "$code" != "200" ] && [ "$code" != "404" ]; then
+          echo "Could not list chaos infrastructures before deleting connector ${self.identifier} (HTTP $code)"
+          head -c 400 "$tmp"; echo
+          rm -f "$tmp"
+          exit 1
+        fi
+        if [ "$code" = "200" ]; then
+          ROWS="$ROWS
+$(python3 -c '
+import json,sys
+data=json.loads(sys.stdin.read() or "{}")
+for inf in data.get("infras") or []:
+    ident=inf.get("identity") or inf.get("infraID") or ""
+    env=inf.get("environmentID") or inf.get("environmentIdentifier") or ""
+    if ident and env:
+        print(env + "\t" + ident)
+' < "$tmp")"
+        fi
+        rm -f "$tmp"
+      done
+      while IFS= read -r row; do
+        [ -n "$row" ] || continue
+        ENV="$${row%%$'\t'*}"
+        ID="$${row#*$'\t'}"
+        echo "Deleting leftover chaos infrastructure $ID before connector ${self.identifier}"
+        tmp=$(mktemp)
+        del=$(curl -sS -o "$tmp" -w "%%{http_code}" -X DELETE \
+          "$ENDPOINT/chaos/manager/api/rest/v2/infrastructure/$ENV/$ID?$Q" \
+          -H "x-api-key: $KEY" || echo 000)
+        if [ "$del" != "200" ] && [ "$del" != "201" ] && [ "$del" != "204" ] && [ "$del" != "404" ]; then
+          if ! grep -qiE 'managed by Harness|could not verify|not a k8s infra|no matching infra' "$tmp"; then
+            echo "Could not delete chaos infrastructure $ID (HTTP $del)"
+            head -c 400 "$tmp"; echo
+            rm -f "$tmp"
+            exit 1
+          fi
+          echo "Chaos API will not delete $ID; the infrastructure delete removes it"
+        fi
+        rm -f "$tmp"
+      done < <(printf '%s\n' "$ROWS")
+    EOT
   }
 
   depends_on = [
@@ -1053,7 +1148,7 @@ resource "harness_platform_connector_aws" "eks" {
   description         = "Org AWS connector (InheritFromDelegate)."
   tags                = local.tags
   execute_on_delegate = true
-  force_delete        = true
+  force_delete        = false
 
   inherit_from_delegate {
     delegate_selectors = [local.delegate_name]
@@ -1064,7 +1159,7 @@ resource "harness_platform_connector_aws" "eks" {
 }
 
 resource "harness_platform_connector_prometheus" "namespace" {
-  for_each = var.create_prometheus_connectors ? local.projects : {}
+  for_each = var.create_prometheus_connectors ? local.active_projects : {}
 
   identifier  = "${local.prometheus_id_prefix}_${each.value.identifier}"
   name        = "${local.prometheus_name_prefix}-${each.value.name}"
@@ -1088,7 +1183,7 @@ resource "harness_platform_connector_prometheus" "namespace" {
 # -----------------------------------------------------------------------------
 
 resource "harness_platform_environment" "this" {
-  for_each = local.projects
+  for_each = local.active_projects
 
   identifier   = local.environment_id
   name         = local.environment_name
@@ -1097,7 +1192,150 @@ resource "harness_platform_environment" "this" {
   type         = var.environment_type
   description  = "HPB workshop environment for namespace ${each.value.namespace}"
   tags         = concat(local.tags, ["namespace:${each.value.namespace}"])
-  force_delete = true
+  force_delete = false
+
+  # Runs after the CD infrastructure resource is gone. Deletes a chaos
+  # infrastructure, discovery agent, or CD infrastructure that an aborted
+  # destroy dropped from state while Harness still had it. In-state CD
+  # infrastructures are deleted by the provider before this runs, so a 404
+  # here is the normal case. forceDelete is not sent; this account rejects it.
+  provisioner "local-exec" {
+    when        = destroy
+    interpreter = ["/bin/bash", "-c"]
+    command     = <<-EOT
+      set -euo pipefail
+      KEY="$${HARNESS_PLATFORM_API_KEY:-$${HARNESS_API_KEY:-}}"
+      if [ -z "$KEY" ]; then
+        echo "Set HARNESS_PLATFORM_API_KEY or HARNESS_API_KEY so environment ${self.identifier} can be deleted."
+        exit 1
+      fi
+      ORG="${self.org_id}"
+      PROJ="${self.project_id}"
+      ENV_ID="${self.identifier}"
+      SCOPE="$${TMPDIR:-/tmp}/hpb-$${ORG}-destroy-scope"
+      ENDPOINT=""
+      ACCT=""
+      if [ -f "$SCOPE" ]; then
+        ENDPOINT=$(sed -n 's/^endpoint=//p' "$SCOPE")
+        ACCT=$(sed -n 's/^account=//p' "$SCOPE")
+      fi
+      if [ -z "$ACCT" ]; then ACCT="$${HARNESS_ACCOUNT_ID:-}"; fi
+      if [ -z "$ACCT" ]; then ACCT="$${TF_VAR_account_id:-}"; fi
+      # Destroy provisioners cannot read var.account_id. This is that variable's default.
+      if [ -z "$ACCT" ]; then ACCT="cTU1lRSWS2SSRV9phKvuOA"; fi
+      if [ -z "$ENDPOINT" ]; then ENDPOINT="$${HARNESS_ENDPOINT:-https://app.harness.io/gateway}"; fi
+      ENDPOINT="$${ENDPOINT%/}"
+      CHAOS="$ENDPOINT/chaos/manager/api"
+      SD="$ENDPOINT/servicediscovery"
+      NG="$ENDPOINT/ng/api"
+      Q="accountIdentifier=$ACCT&organizationIdentifier=$ORG&projectIdentifier=$PROJ"
+
+      http() {
+        local method="$1" url="$2" body="$${3:-}" tmp code
+        tmp=$(mktemp)
+        if [ -n "$body" ]; then
+          code=$(curl -sS -o "$tmp" -w "%%{http_code}" -X "$method" "$url" \
+            -H "x-api-key: $KEY" -H "Content-Type: application/json" -d "$body" || echo 000)
+        else
+          code=$(curl -sS -o "$tmp" -w "%%{http_code}" -X "$method" "$url" \
+            -H "x-api-key: $KEY" -H "Content-Type: application/json" || echo 000)
+        fi
+        HTTP_CODE="$code"
+        HTTP_BODY=$(cat "$tmp")
+        rm -f "$tmp"
+      }
+      gone() {
+        case "$HTTP_CODE" in
+          200|201|204|404) return 0 ;;
+        esac
+        printf '%s' "$HTTP_BODY" | grep -qiE 'not found|does not exist|already deleted|no matching' && return 0
+        return 1
+      }
+
+      http POST "$CHAOS/rest/v2/infrastructures?$Q&environmentIdentifier=$ENV_ID&envID=$ENV_ID&page=0&limit=100" \
+        "{\"filter\":{\"environmentIDs\":[\"$ENV_ID\"]}}"
+      if [ "$HTTP_CODE" != "200" ] && [ "$HTTP_CODE" != "404" ]; then
+        echo "Could not list chaos infrastructures in $ORG/$PROJ (HTTP $HTTP_CODE)"
+        printf '%s\n' "$HTTP_BODY" | head -c 400; echo
+        exit 1
+      fi
+      if [ "$HTTP_CODE" = "200" ]; then
+        ROWS=$(printf '%s' "$HTTP_BODY" | python3 -c '
+import json,sys
+data=json.loads(sys.stdin.read() or "{}")
+for inf in data.get("infras") or []:
+    ident=inf.get("identity") or inf.get("infraID") or ""
+    env=inf.get("environmentID") or inf.get("environmentIdentifier") or ""
+    if ident and env:
+        print(env + "\t" + ident)
+')
+        while IFS= read -r row; do
+          [ -n "$row" ] || continue
+          ENV="$${row%%$'\t'*}"
+          ID="$${row#*$'\t'}"
+          echo "Deleting leftover chaos infrastructure $ID in $ENV"
+          http DELETE "$CHAOS/rest/v2/infrastructure/$ENV/$ID?$Q"
+          if ! gone; then
+            if printf '%s' "$HTTP_BODY" | grep -qiE 'managed by Harness|could not verify|not a k8s infra|no matching infra'; then
+              echo "Chaos API will not delete $ID; removing it as a CD infrastructure"
+              http DELETE "$NG/infrastructures/$ID?$Q&environmentIdentifier=$ENV"
+              gone || { echo "Could not delete CD infrastructure $ID (HTTP $HTTP_CODE)"; exit 1; }
+            else
+              echo "Could not delete chaos infrastructure $ID (HTTP $HTTP_CODE)"
+              printf '%s\n' "$HTTP_BODY" | head -c 400; echo
+              exit 1
+            fi
+          fi
+        done < <(printf '%s\n' "$ROWS")
+      fi
+
+      http GET "$SD/api/v1/agents?$Q&environmentIdentifier=$ENV_ID&page=0&limit=100&all=true"
+      if [ "$HTTP_CODE" != "200" ] && [ "$HTTP_CODE" != "404" ]; then
+        echo "Could not list discovery agents in $ORG/$PROJ/$ENV_ID (HTTP $HTTP_CODE)"
+        printf '%s\n' "$HTTP_BODY" | head -c 400; echo
+        exit 1
+      fi
+      if [ "$HTTP_CODE" = "200" ]; then
+        AGENTS=$(printf '%s' "$HTTP_BODY" | python3 -c '
+import json,sys
+data=json.loads(sys.stdin.read() or "{}")
+items=data.get("items") or []
+for agent in items:
+    ident=agent.get("identity") or ""
+    if ident and not agent.get("removed"):
+        print(ident)
+')
+        for ID in $AGENTS; do
+          echo "Deleting leftover discovery agent $ID"
+          http DELETE "$SD/api/v1/agents/$ID?$Q&environmentIdentifier=$ENV_ID"
+          gone || { echo "Could not delete discovery agent $ID (HTTP $HTTP_CODE)"; exit 1; }
+        done
+      fi
+
+      http GET "$NG/infrastructures?$Q&environmentIdentifier=$ENV_ID&size=100"
+      if [ "$HTTP_CODE" != "200" ] && [ "$HTTP_CODE" != "404" ]; then
+        echo "Could not list CD infrastructures in $ORG/$PROJ/$ENV_ID (HTTP $HTTP_CODE)"
+        printf '%s\n' "$HTTP_BODY" | head -c 400; echo
+        exit 1
+      fi
+      if [ "$HTTP_CODE" = "200" ]; then
+        INFRA=$(printf '%s' "$HTTP_BODY" | python3 -c '
+import json,sys
+data=json.loads(sys.stdin.read() or "{}")
+for item in ((data.get("data") or {}).get("content")) or []:
+    infra=item.get("infrastructure") or item
+    ident=infra.get("identifier") or ""
+    if ident:
+        print(ident)
+')
+        for ID in $INFRA; do
+          echo "Deleting leftover CD infrastructure $ID in $ENV_ID"
+          http DELETE "$NG/infrastructures/$ID?$Q&environmentIdentifier=$ENV_ID"
+          gone || { echo "Could not delete CD infrastructure $ID (HTTP $HTTP_CODE)"; exit 1; }
+        done
+      fi
+    EOT
+  }
 }
 
 # The API stores the tags declared in the YAML body and ignores anything extra
@@ -1107,7 +1345,7 @@ resource "harness_platform_environment" "this" {
 # the same in-place tag update forever.
 locals {
   infra_tags = {
-    for k, p in local.projects : k => concat(local.tags, ["namespace:${p.namespace}"])
+    for k, p in local.active_projects : k => concat(local.tags, ["namespace:${p.namespace}"])
   }
 
   # Split on the first colon only, so a value containing one (a URL, say)
@@ -1123,7 +1361,7 @@ locals {
 }
 
 resource "harness_platform_infrastructure" "this" {
-  for_each = local.projects
+  for_each = local.active_projects
 
   identifier      = each.value.infra_id
   name            = local.infra_name
@@ -1132,7 +1370,7 @@ resource "harness_platform_infrastructure" "this" {
   env_id          = harness_platform_environment.this[each.key].identifier
   type            = "KubernetesDirect"
   deployment_type = "Kubernetes"
-  force_delete    = true
+  force_delete    = false
   tags            = local.infra_tags[each.key]
 
   lifecycle {
@@ -1238,7 +1476,7 @@ resource "terraform_data" "discovery_cluster_scope" {
 # so Terraform cheerfully plans an in-place update that can only fail. Bind the
 # agent's replacement to them so a change recreates the agent instead.
 resource "terraform_data" "discovery_agent_binding" {
-  for_each = local.projects
+  for_each = local.active_projects
 
   input = join("|", [
     local.org_identifier,
@@ -1255,7 +1493,7 @@ resource "terraform_data" "discovery_agent_binding" {
 # instances are forgotten by the removed block below; this new address builds
 # the agents fresh.
 resource "harness_service_discovery_agent" "agent" {
-  for_each = local.projects
+  for_each = local.active_projects
 
   name                   = "${local.discovery_name_prefix}-${each.value.name}"
   org_identifier         = local.org_identifier
@@ -1341,63 +1579,20 @@ output "discovery_installation" {
   }
 }
 
-resource "harness_chaos_infrastructure_v2" "this" {
-  for_each = local.projects
-
-  org_id         = local.org_identifier
-  project_id     = harness_platform_project.this[each.key].identifier
-  environment_id = harness_platform_environment.this[each.key].identifier
-  infra_id       = harness_platform_infrastructure.this[each.key].identifier
-  name           = "${local.chaos_name_prefix}-${each.value.name}"
-  description    = "DDCR chaos infrastructure for namespace ${each.value.namespace}"
-  tags           = concat(local.tags, ["namespace:${each.value.namespace}"])
-
-  namespace          = each.value.namespace
-  infra_type         = var.chaos_infra_type
-  infra_scope        = var.chaos_infra_scope
-  ai_enabled         = var.ai_enabled
-  discovery_agent_id = coalesce(harness_service_discovery_agent.agent[each.key].identity, harness_service_discovery_agent.agent[each.key].id)
-  service_account    = var.chaos_service_account
-
-  resources {
-    requests {
-      cpu    = "250m"
-      memory = "256Mi"
-    }
-    limits {
-      cpu    = "500m"
-      memory = "512Mi"
-    }
-  }
-
-  # infra_scope is immutable per the provider docs, and the server does not
-  # persist NAMESPACE on create — it stores CLUSTER and the namespace field
-  # alone decides where the components land (infra_namespace reads back as
-  # banking-N). A config asking for NAMESPACE therefore never converges: every
-  # plan sees CLUSTER -> NAMESPACE, forces replacement, and the recreate races
-  # its own delete for the account_org_project_env_identity unique index, which
-  # is what returned "E11000 duplicate key" for three of four projects.
-  #
-  # The empty maps are the same class of noise: the API returns {} where config
-  # has nothing, so each one is an in-place update on every run for no effect.
-  lifecycle {
-    ignore_changes = [
-      infra_scope,
-      annotation,
-      label,
-      node_selector,
-    ]
-  }
-
-  depends_on = [harness_service_discovery_agent.agent]
+# DDCR chaos infrastructure is the CD infrastructure (hpbk8sN). The chaos
+# provider's delete returns 500 "could not verify whether this infrastructure
+# is managed by Harness", which blocks destroy. Forget these state entries
+# without calling that API. harness_platform_infrastructure deletes the record.
+removed {
+  from = harness_chaos_infrastructure_v2.this
+  lifecycle { destroy = false }
 }
 
 resource "null_resource" "install_chaos" {
-  for_each = var.apply_chaos_install_command ? local.projects : {}
+  for_each = var.apply_chaos_install_command ? local.active_projects : {}
 
   triggers = {
-    infra_id = harness_chaos_infrastructure_v2.this[each.key].id
-    command  = harness_chaos_infrastructure_v2.this[each.key].install_command
+    infra_id = harness_platform_infrastructure.this[each.key].id
     cluster  = local.cluster_name
     region   = var.aws_region
   }
@@ -1406,38 +1601,13 @@ resource "null_resource" "install_chaos" {
     interpreter = ["/bin/bash", "-c"]
     command     = <<-EOT
       set -euo pipefail
-      # Not coalesce(): it rejects "" as well as null, so a null install_command
-      # (which is what this API returns for connector-based DDCR) made the
-      # whole apply fail with "no non-null, non-empty-string arguments".
-      CMD=${jsonencode(try(harness_chaos_infrastructure_v2.this[each.key].install_command, "") == null ? "" : try(harness_chaos_infrastructure_v2.this[each.key].install_command, ""))}
-      if [ -z "$${CMD}" ] || [ "$${CMD}" = "null" ]; then
-        echo "No chaos install command for ${each.value.namespace}; DDCR uses connector ${local.k8s_connector_id}"
-        exit 0
-      fi
-      RETRIES=${var.apply_retries}
-      DELAY=${var.apply_retry_interval}
-      KUBECONFIG_FILE="/tmp/hpb-eks-${each.value.identifier}.kubeconfig"
-      i=1
-      while [ "$i" -le "$RETRIES" ]; do
-        echo "chaos install ${each.value.namespace} attempt $i/$RETRIES"
-        if aws eks update-kubeconfig --region ${var.aws_region} --name ${local.cluster_name} --kubeconfig "$KUBECONFIG_FILE" \
-          && export KUBECONFIG="$KUBECONFIG_FILE" \
-          && bash -lc "$CMD"; then
-          echo "Chaos install succeeded for ${each.value.namespace}"
-          exit 0
-        fi
-        if [ "$i" -eq "$RETRIES" ]; then
-          echo "Chaos install failed for ${each.value.namespace} after $RETRIES attempts; re-run terraform apply"
-          exit 1
-        fi
-        sleep "$DELAY"
-        i=$((i + 1))
-      done
+      echo "No chaos install command for ${each.value.namespace}; DDCR uses connector ${local.k8s_connector_id}"
     EOT
   }
 
-  depends_on = [harness_chaos_infrastructure_v2.this]
+  depends_on = [harness_platform_infrastructure.this]
 }
+
 
 # -----------------------------------------------------------------------------
 # Outputs
@@ -1473,7 +1643,7 @@ output "k8s_connector_refs" {
 }
 
 resource "harness_chaos_experiment" "from_template" {
-  for_each = var.experiment_template_identity != "" && var.experiment_hub_identity != "" ? local.projects : {}
+  for_each = var.experiment_template_identity != "" && var.experiment_hub_identity != "" ? local.active_projects : {}
 
   org_id     = local.org_identifier
   project_id = harness_platform_project.this[each.key].identifier
@@ -1494,10 +1664,13 @@ resource "harness_chaos_experiment" "from_template" {
     ignore_changes = [tags]
   }
 
+  # Provider delete runs before null_resource.chaos_experiments_in_projects,
+  # while this experiment still exists. The null resource then deletes any
+  # experiment that was created in the project and is not in state.
   depends_on = [
-    harness_chaos_infrastructure_v2.this,
     harness_platform_infrastructure.this,
-    harness_chaos_experiment_template.this,
+    terraform_data.chaos_templates,
+    null_resource.chaos_experiments_in_projects,
   ]
 }
 
@@ -1511,12 +1684,10 @@ output "chaos_hub" {
 }
 
 output "chaos_experiment_templates" {
-  value = {
-    for key, tmpl in harness_chaos_experiment_template.this : key => {
-      identity = tmpl.identity
-      name     = tmpl.name
-    }
-  }
+  value = sort([
+    for f in fileset("${path.module}/chaos-templates/experiments", "*.yaml") :
+    trimsuffix(f, ".yaml")
+  ])
 }
 
 output "experiments" {
@@ -1553,10 +1724,9 @@ output "discovery_agents" {
 
 output "chaos_infrastructures" {
   value = {
-    for ns, infra in harness_chaos_infrastructure_v2.this : ns => {
-      name   = infra.name
-      id     = infra.id
-      status = infra.status
+    for ns, infra in harness_platform_infrastructure.this : ns => {
+      name = infra.name
+      id   = infra.id
     }
   }
 }

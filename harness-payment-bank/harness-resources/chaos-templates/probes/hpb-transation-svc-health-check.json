@@ -1,0 +1,39 @@
+{
+  "identity": "hpb-transation-svc-health-check",
+  "name": "hpb-transation-svc-health-check",
+  "description": "",
+  "hubRef": "__HUB__",
+  "type": "httpProbe",
+  "infrastructureType": "Kubernetes",
+  "tags": [],
+  "probeProperties": {
+    "httpProbe": {
+      "method": {
+        "get": {
+          "responseCode": "200",
+          "criteria": "=="
+        }
+      },
+      "url": "<+input>",
+      "auth": {
+        "credentials": "<+input>",
+        "type": "Bearer"
+      },
+      "tlsConfig": {
+        "caFile": "",
+        "certFile": "",
+        "keyFile": "",
+        "insecureSkipVerify": true
+      }
+    }
+  },
+  "runProperties": {
+    "timeout": "2s",
+    "interval": "5s",
+    "attempt": 2,
+    "pollingInterval": "10s",
+    "initialDelay": "1s",
+    "verbosity": "debug"
+  },
+  "variables": []
+}

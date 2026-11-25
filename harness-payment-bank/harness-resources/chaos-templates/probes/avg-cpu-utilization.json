@@ -1,0 +1,59 @@
+{
+  "identity": "avg-cpu-utilization",
+  "name": "avg-cpu-utilization",
+  "description": "",
+  "hubRef": "__HUB__",
+  "type": "apmProbe",
+  "infrastructureType": "Kubernetes",
+  "tags": [],
+  "probeProperties": {
+    "apmProbe": {
+      "comparator": {
+        "type": "float",
+        "value": "4",
+        "criteria": "<="
+      },
+      "type": "Prometheus",
+      "prometheusProbeInputs": {
+        "connectorID": "<+input>",
+        "query": "sum(rate(container_cpu_usage_seconds_total{namespace=\"<+probe.variables.NAMESPACE>\",pod=~\"<+probe.variables.SERVICE_NAME>-.*\"}[2m]))"
+      }
+    }
+  },
+  "runProperties": {
+    "timeout": "20s",
+    "interval": "2s",
+    "attempt": 2,
+    "pollingInterval": "10s",
+    "initialDelay": "1s",
+    "verbosity": "debug"
+  },
+  "variables": [
+    {
+      "name": "NAMESPACE",
+      "value": "<+input>",
+      "type": "String",
+      "required": true
+    },
+    {
+      "name": "SERVICE_NAME",
+      "value": "<+input>",
+      "type": "String",
+      "required": true
+    }
+  ],
+  "inputs": [
+    {
+      "name": "PROMETHEUSPROBEINPUTS_CONNECTORID",
+      "value": "<+input>",
+      "path": ".probeProperties.apmProbe.prometheusProbeInputs.connectorID",
+      "category": "ProbeProperties",
+      "type": "String",
+      "required": true,
+      "reference": {
+        "kind": "Connector",
+        "type": "Prometheus"
+      }
+    }
+  ]
+}

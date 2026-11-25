@@ -4,21 +4,22 @@
 # All inputs have defaults in variables.tf. Harness can override any input by
 # setting TF_VAR_<variable_name>, for example TF_VAR_cluster_name.
 #
-# Manifests are vendored at ../hpb-manifest/hpb-k8s (same git repo). They are
-# applied as-is; Terraform patches live objects after apply.
+# Manifests are vendored at ../hpb-manifest/hpb-k8s (same git repo). Apply uses
+# a copy so the LoadBalancer Services can be annotated NLB first.
+# Terraform still patches live Prometheus objects after apply.
 #
 # terraform init && terraform apply
 # terraform output service_endpoints
 
 terraform {
-  required_version = ">= 1.5.0"
+  required_version = ">= 1.10.0"
 
   backend "s3" {
-    bucket         = "hpb-demo-tfstate-naren"
-    key            = "hpb-eks/terraform.tfstate"
-    region         = "us-east-1"
-    encrypt        = true
-    dynamodb_table = "hpb-demo-tf-lock"
+    bucket       = "hpb-demo-tfstate-naren"
+    key          = "hpb-eks/terraform.tfstate"
+    region       = "us-east-1"
+    encrypt      = true
+    use_lockfile = true
   }
 
   required_providers {
@@ -39,6 +40,10 @@ terraform {
     null = {
       source  = "hashicorp/null"
       version = "~> 3.2"
+    }
+    external = {
+      source  = "hashicorp/external"
+      version = "~> 2.3"
     }
   }
 }
@@ -76,7 +81,7 @@ locals {
   namespace_names = [
     for i in range(1, var.namespace_count + 1) : "${var.namespace_prefix}-${i}"
   ]
-  deploy_namespaces = var.deploy_apps ? toset(local.namespace_names) : toset([])
+  deploy_namespaces = var.deploy_apps && var.manage_namespaces ? toset(local.namespace_names) : toset([])
 
   common_tags = {
     Project   = "hpb"
@@ -89,7 +94,7 @@ locals {
     clusters = [{
       name = "hpb-eks"
       cluster = {
-        server                     = module.eks.cluster_endpoint
+        server                       = module.eks.cluster_endpoint
         "certificate-authority-data" = module.eks.cluster_certificate_authority_data
       }
     }]
@@ -117,10 +122,11 @@ locals {
     "current-context" = "hpb-eks"
   })
 
-  # kubectl uses aws eks get-token (aws + kubectl must be on PATH).
+  # One file per shell. Parallel namespace steps must not share a path:
+  # a neighbor's rewrite makes kubectl fall back to http://localhost:8080.
   kubeconfig = join("\n", [
     "export PATH=\"/usr/local/bin:/usr/bin:/opt/harness-delegate/client-tools/kubectl/v1.19.2:/opt/harness-delegate/client-tools/kubectl/v1.13.2:$PATH\"",
-    "export KUBECONFIG=/tmp/hpb-eks.kubeconfig",
+    "export KUBECONFIG=$(mktemp)",
     "cat > \"$KUBECONFIG\" <<'KUBEEOF'",
     local.kubeconfig_yaml,
     "KUBEEOF",
@@ -138,17 +144,34 @@ locals {
   # Names below match the vendored hpb-k8s manifests. They are not pipeline inputs.
   frontend_deployment           = "frontend-service"
   gateway_service               = "gateway-service"
+  gateway_external_service      = "gateway-service-external"
+  grafana_service               = "grafana"
   frontend_gateway_env          = "VITE_API_URL"
-  gateway_port                  = 8080
+  gateway_port                  = 80
   prometheus_service            = "prometheus"
   prometheus_deployment         = "prometheus"
   prometheus_config_map         = "prometheus-config"
   prometheus_service_account    = "prometheus"
   prometheus_cluster_role       = "prometheus"
   prometheus_manifest_namespace = "banking"
-  postgres_statefulset          = "postgresql"
-  postgres_user                 = "postgres"
-  app_databases                 = ["auth", "transaction", "account", "loan", "notification"]
+  lb_services = [
+    "frontend-service",
+    "gateway-service-external",
+    "prometheus",
+    "grafana",
+  ]
+  lb_services_shell = join(" ", local.lb_services)
+  nlb_per_namespace = length(local.lb_services)
+  lb_manifest_files = [
+    "frontend-service.yaml",
+    "gateway-service-external.yaml",
+    "prometheus.yaml",
+    "grafana-all-in-one.yaml",
+  ]
+  lb_manifest_files_shell = join(" ", local.lb_manifest_files)
+  postgres_statefulset    = "postgresql"
+  postgres_user           = "postgres"
+  app_databases           = ["auth", "transaction", "account", "loan", "notification"]
   app_deployments = [
     "auth-service",
     "transaction-service",
@@ -160,6 +183,255 @@ locals {
   app_ready_timeout      = "20m"
   data_pvcs              = ["postgresql-pvc", "mongodb-pvc", "kafka-pvc"]
   data_statefulsets      = ["postgresql", "mongodb", "kafka"]
+
+  # Client-side apply merges probe handlers. A manifest that switches
+  # tcpSocket for exec is rejected until the live probe is replaced wholesale.
+  kubectl_apply_helpers = <<-EOT
+    to_json_pointer() {
+      printf '%s' "$1" | sed -E 's/^spec/\/spec/; s/\.([A-Za-z0-9_]+)/\/\1/g; s/\[([0-9]+)\]/\/\1/g'
+    }
+
+    drop_cluster_scoped() {
+      awk '
+        function flush() {
+          if (n && kind != "ClusterRole" && kind != "ClusterRoleBinding") {
+            if (out) print "---"
+            printf "%s", doc
+            out = 1
+          }
+          doc = ""; n = 0; kind = ""
+        }
+        BEGIN { doc = ""; n = 0; kind = ""; out = 0 }
+        /^---[[:space:]]*$/ { flush(); next }
+        { if ($0 ~ /^kind:[[:space:]]/) kind = $2; doc = doc $0 ORS; n++ }
+        END { flush() }
+      ' "$1" > "$2"
+    }
+
+    keep_cluster_scoped() {
+      awk '
+        function flush() {
+          if (n && (kind == "ClusterRole" || kind == "ClusterRoleBinding")) {
+            if (out) print "---"
+            printf "%s", doc
+            out = 1
+          }
+          doc = ""; n = 0; kind = ""
+        }
+        BEGIN { doc = ""; n = 0; kind = ""; out = 0 }
+        /^---[[:space:]]*$/ { flush(); next }
+        { if ($0 ~ /^kind:[[:space:]]/) kind = $2; doc = doc $0 ORS; n++ }
+        END { flush() }
+      ' "$1" > "$2"
+    }
+
+    keep_kind() {
+      awk -v want="$2" '
+        function flush() {
+          if (n && kind == want) {
+            if (out) print "---"
+            printf "%s", doc
+            out = 1
+          }
+          doc = ""; n = 0; kind = ""
+        }
+        BEGIN { doc = ""; n = 0; kind = ""; out = 0 }
+        /^---[[:space:]]*$/ { flush(); next }
+        { if ($0 ~ /^kind:[[:space:]]/) kind = $2; doc = doc $0 ORS; n++ }
+        END { flush() }
+      ' "$1" > "$3"
+    }
+
+    # Client-side apply races across namespaces: the second create gets
+    # AlreadyExists. That is success if the object is already there.
+    apply_ignore_exists() {
+      local blob
+      if blob=$(kubectl apply --validate=false -f "$1" 2>&1); then
+        printf '%s\n' "$blob"
+        return 0
+      fi
+      if printf '%s\n' "$blob" | grep -q 'AlreadyExists'; then
+        echo "already exists; continuing"
+        return 0
+      fi
+      printf '%s\n' "$blob" >&2
+      return 1
+    }
+
+    repair_probe_handlers() {
+      local ns="$1" blob="$2" search="$3"
+      local obj kind name res file path parent ptr probe paths
+      obj=$(printf '%s\n' "$blob" | sed -nE \
+        -e 's/.*(StatefulSet|Deployment|DaemonSet)\.apps "([^"]*)".*/\1 \2/p' \
+        -e 's/.*The (StatefulSet|Deployment|DaemonSet) "([^"]*)".*/\1 \2/p' \
+        | head -n 1)
+      if [ -z "$obj" ]; then
+        echo "[$ns] could not tell which object rejected the probe" >&2
+        return 1
+      fi
+      kind=$(printf '%s' "$obj" | awk '{print $1}')
+      name=$(printf '%s' "$obj" | awk '{print $2}')
+      res=$(printf '%s' "$kind" | tr '[:upper:]' '[:lower:]')
+      file=$(printf '%s\n' "$blob" | sed -nE 's/.*for: "([^"]*)".*/\1/p' | head -n 1)
+      if [ -z "$file" ] || [ ! -f "$file" ]; then
+        file=""
+        for candidate in "$search"/*.yaml "$search"/*.yml "$search"; do
+          [ -f "$candidate" ] || continue
+          if grep -q "kind: $kind" "$candidate" && grep -q "name: $name" "$candidate"; then
+            file="$candidate"
+            break
+          fi
+        done
+      fi
+      if [ -z "$file" ]; then
+        echo "[$ns] could not find the manifest for $kind/$name" >&2
+        return 1
+      fi
+      paths=$(mktemp)
+      printf '%s\n' "$blob" | sed -nE 's/.*(spec\.template\.spec\.[^:[:space:]]+): Forbidden: may not specify more than 1 handler type.*/\1/p' | sort -u > "$paths" || true
+      while IFS= read -r path; do
+        [ -n "$path" ] || continue
+        parent=$(printf '%s' "$path" | sed 's/\.[^.]*$//')
+        ptr=$(to_json_pointer "$parent")
+        probe=$(kubectl create --dry-run=client --validate=false -f "$file" -n "$ns" -o jsonpath="{.$parent}" 2>/dev/null || true)
+        if [ -z "$probe" ] || [ "$probe" = "null" ]; then
+          echo "[$ns] manifest has no $parent for $name" >&2
+          continue
+        fi
+        echo "[$ns] replacing $res/$name $parent from the manifest"
+        kubectl patch "$res" "$name" -n "$ns" --type=json \
+          -p="[{\"op\":\"replace\",\"path\":\"$ptr\",\"value\":$probe}]"
+      done < "$paths"
+      rm -f "$paths"
+    }
+
+    apply_with_repair() {
+      local target="$1" ns="$2" search="$3"
+      local attempt blob
+      for attempt in 1 2 3 4 5; do
+        if blob=$(kubectl apply --validate=false -f "$target" -n "$ns" 2>&1); then
+          printf '%s\n' "$blob"
+          return 0
+        fi
+        printf '%s\n' "$blob" >&2
+        if printf '%s\n' "$blob" | grep -q "may not specify more than 1 handler type"; then
+          echo "[$ns] manifest replaced a probe handler; updating the live object"
+          repair_probe_handlers "$ns" "$blob" "$search" || true
+          if blob=$(kubectl apply --validate=false -f "$target" -n "$ns" 2>&1); then
+            printf '%s\n' "$blob"
+            return 0
+          fi
+          printf '%s\n' "$blob" >&2
+        fi
+        if printf '%s\n' "$blob" | grep -q "is invalid:"; then
+          echo "[$ns] Kubernetes rejected the manifest; not retrying"
+          return 1
+        fi
+        echo "[$ns] apply attempt $attempt failed; retrying"
+        sleep $((attempt * 5))
+      done
+      return 1
+    }
+
+    # An existing Service keeps the balancer it already has. Adding the NLB
+    # annotation on a later apply makes AWS create a second one.
+    keep_existing_balancer() {
+      local file="$1" ns="$2" svc="$3" ann tmp
+      [ -f "$file" ] || return 0
+      if ! kubectl get svc "$svc" -n "$ns" >/dev/null 2>&1; then
+        echo "[$ns] service/$svc is new and will be created once"
+        return 0
+      fi
+      ann=$(kubectl get svc "$svc" -n "$ns" -o jsonpath='{.metadata.annotations.service\.beta\.kubernetes\.io/aws-load-balancer-type}' 2>/dev/null || true)
+      if [ "$ann" = "nlb" ]; then
+        echo "[$ns] reusing service/$svc"
+        return 0
+      fi
+      echo "[$ns] reusing service/$svc and its current load balancer"
+      tmp=$(mktemp)
+      awk '
+        /^kind: Service$/ { in_svc=1 }
+        in_svc && /^spec:/ { in_svc=0 }
+        in_svc && /^  annotations:$/ { hold=1; next }
+        in_svc && hold && /aws-load-balancer-type:/ { hold=0; next }
+        in_svc && hold { print "  annotations:"; hold=0 }
+        { print }
+      ' "$file" > "$tmp"
+      mv "$tmp" "$file"
+    }
+
+    # A failed apply can leave an extra balancer tagged for the same Service.
+    # Keep the one the Service is using. If the Service has no hostname yet and
+    # more than one balancer is tagged for it, keep the oldest and delete the rest.
+    drop_orphan_balancers() {
+      local ns="$1" region="$2"
+      local svc host arns arn dns keep name ts keep_time n typ
+      # gateway-service used to be a LoadBalancer; convert leftovers after it
+      # becomes ClusterIP.
+      for svc in ${local.lb_services_shell} gateway-service; do
+        typ=$(kubectl get svc "$svc" -n "$ns" -o jsonpath='{.spec.type}' 2>/dev/null || true)
+        host=$(kubectl get svc "$svc" -n "$ns" -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
+        host=$${host%.}
+        arns=$(aws resourcegroupstaggingapi get-resources --region "$region" \
+          --resource-type-filters elasticloadbalancing:loadbalancer \
+          --tag-filters "Key=kubernetes.io/service-name,Values=$${ns}/$${svc}" \
+          --query 'ResourceTagMappingList[].ResourceARN' --output text 2>/dev/null || true)
+        [ -n "$arns" ] && [ "$arns" != "None" ] || continue
+        if [ "$typ" != "LoadBalancer" ]; then
+          keep=""
+        else
+          keep=""
+          keep_time=""
+          n=0
+          for arn in $arns; do
+            n=$((n + 1))
+            case "$arn" in
+              *:loadbalancer/net/*|*:loadbalancer/app/*)
+                dns=$(aws elbv2 describe-load-balancers --region "$region" --load-balancer-arns "$arn" --query 'LoadBalancers[0].[DNSName,CreatedTime]' --output text 2>/dev/null || true)
+                ts=$(printf '%s' "$dns" | awk '{print $2}')
+                dns=$(printf '%s' "$dns" | awk '{print $1}')
+                ;;
+              *)
+                name=$(printf '%s' "$arn" | awk -F/ '{print $NF}')
+                dns=$(aws elb describe-load-balancers --region "$region" --load-balancer-names "$name" --query 'LoadBalancerDescriptions[0].[DNSName,CreatedTime]' --output text 2>/dev/null || true)
+                ts=$(printf '%s' "$dns" | awk '{print $2}')
+                dns=$(printf '%s' "$dns" | awk '{print $1}')
+                ;;
+            esac
+            dns=$${dns%.}
+            if [ -n "$host" ] && [ "$dns" = "$host" ]; then
+              keep="$arn"
+            fi
+            if [ -z "$host" ]; then
+              if [ -z "$keep" ] || [[ "$ts" < "$keep_time" ]]; then
+                keep="$arn"
+                keep_time="$ts"
+              fi
+            fi
+          done
+          if [ -n "$host" ] && [ -z "$keep" ]; then
+            continue
+          fi
+          if [ -z "$host" ] && [ "$n" -le 1 ]; then
+            continue
+          fi
+        fi
+        for arn in $arns; do
+          [ "$arn" = "$keep" ] && continue
+          echo "[$ns] deleting leftover balancer for service/$svc"
+          case "$arn" in
+            *:loadbalancer/net/*|*:loadbalancer/app/*)
+              aws elbv2 delete-load-balancer --region "$region" --load-balancer-arn "$arn" || true
+              ;;
+            *)
+              name=$(printf '%s' "$arn" | awk -F/ '{print $NF}')
+              aws elb delete-load-balancer --region "$region" --load-balancer-name "$name" || true
+              ;;
+          esac
+        done
+      done
+    }
+  EOT
 
   frontend_lb = {
     for ns, svc in data.kubernetes_service_v1.frontend :
@@ -173,13 +445,18 @@ locals {
     for ns, svc in data.kubernetes_service_v1.prometheus :
     ns => try(svc.status[0].load_balancer[0].ingress[0].hostname, try(svc.status[0].load_balancer[0].ingress[0].ip, null))
   }
+  grafana_lb = {
+    for ns, svc in data.kubernetes_service_v1.grafana :
+    ns => try(svc.status[0].load_balancer[0].ingress[0].hostname, try(svc.status[0].load_balancer[0].ingress[0].ip, null))
+  }
 
   service_endpoints = {
     for ns in local.namespace_names : ns => {
       namespace  = ns
       frontend   = try(local.frontend_lb[ns], null) != null ? "http://${local.frontend_lb[ns]}" : null
-      gateway    = try(local.gateway_lb[ns], null) != null ? "http://${local.gateway_lb[ns]}:${local.gateway_port}" : null
-      prometheus = try(local.prometheus_lb[ns], null) != null ? "http://${local.prometheus_lb[ns]}:9090" : null
+      gateway    = try(local.gateway_lb[ns], null) != null ? "http://${local.gateway_lb[ns]}" : null
+      prometheus = try(local.prometheus_lb[ns], null) != null ? "http://${local.prometheus_lb[ns]}" : null
+      grafana    = try(local.grafana_lb[ns], null) != null ? "http://${local.grafana_lb[ns]}" : null
     } if var.deploy_apps
   }
 }
@@ -366,6 +643,282 @@ resource "null_resource" "wait_after_eks" {
 }
 
 # -----------------------------------------------------------------------------
+# Plan-time guard. Runs during terraform plan, before any node or load
+# balancer update. Variable checks only compare the config with itself.
+# EKS compares the new minimum and maximum with the size already running.
+# -----------------------------------------------------------------------------
+data "external" "preflight" {
+  program = ["bash", "-c", <<-EOT
+    set -euo pipefail
+    cat >/dev/null
+    REGION=${jsonencode(var.aws_region)}
+    CLUSTER=${jsonencode(var.cluster_name)}
+    PREFIX=${jsonencode(var.namespace_prefix)}
+    COUNT=${var.namespace_count}
+    NLB_NEED=$((COUNT * ${local.nlb_per_namespace}))
+    cluster_exists=false
+    nodegroup_exists=false
+    live_min=0
+    live_max=0
+    live_desired=0
+    nlb_quota_known=false
+    nlb_quota=0
+    nlb_used=0
+    nodes_known=false
+    ready_nodes=0
+    placeable=true
+    orphan_nlbs=0
+    orphan_volumes=0
+    residue=none
+
+    if ! CLUSTER_ERR=$(aws eks describe-cluster --name "$CLUSTER" --region "$REGION" --query 'cluster.status' --output text 2>&1); then
+      case "$CLUSTER_ERR" in
+        *ResourceNotFoundException*|*NotFound*) ;;
+        *)
+          echo "Could not read cluster $CLUSTER: $CLUSTER_ERR" >&2
+          exit 1
+          ;;
+      esac
+    else
+      cluster_exists=true
+      NGS=$(aws eks list-nodegroups --cluster-name "$CLUSTER" --region "$REGION" --query 'nodegroups' --output text)
+      for NG in $NGS; do
+        case "$NG" in
+          main-*) ;;
+          *) continue ;;
+        esac
+        nodegroup_exists=true
+        SCALING=$(aws eks describe-nodegroup --cluster-name "$CLUSTER" --nodegroup-name "$NG" --region "$REGION" --query 'nodegroup.scalingConfig.[minSize,maxSize,desiredSize]' --output text)
+        live_min=$(echo "$SCALING" | awk '{print $1}')
+        live_max=$(echo "$SCALING" | awk '{print $2}')
+        live_desired=$(echo "$SCALING" | awk '{print $3}')
+        break
+      done
+      if [ "$nodegroup_exists" = true ]; then
+        for n in "$live_min" "$live_max" "$live_desired"; do
+          case "$n" in
+            ''|*[!0-9]*)
+              echo "Could not read scaling for node group on $CLUSTER (got '$SCALING')" >&2
+              exit 1
+              ;;
+          esac
+        done
+      fi
+    fi
+
+    QUOTA=$(aws service-quotas get-service-quota \
+      --service-code elasticloadbalancing \
+      --quota-code L-69A177A2 \
+      --region "$REGION" \
+      --query 'Quota.Value' --output text 2>/dev/null || true)
+    if [ -n "$QUOTA" ] && [ "$QUOTA" != "None" ]; then
+      nlb_quota_known=true
+      nlb_quota=$(echo "$QUOTA" | awk -F. '{print $1}')
+      nlb_used=$(aws elbv2 describe-load-balancers --region "$REGION" \
+        --query "length(LoadBalancers[?Type=='network'])" --output text)
+      for n in "$nlb_quota" "$nlb_used"; do
+        case "$n" in
+          ''|*[!0-9]*)
+            echo "Could not read the network load balancer quota (quota '$QUOTA', in use '$nlb_used')" >&2
+            exit 1
+            ;;
+        esac
+      done
+    fi
+
+    # A retry must not demand a balancer for a Service that already exists.
+    # The first apply of banking-5..10 already created theirs.
+    if [ "$cluster_exists" = true ]; then
+      found=""
+      listed=false
+      KCFG=$(mktemp)
+      if aws eks update-kubeconfig --kubeconfig "$KCFG" --name "$CLUSTER" --region "$REGION" >/dev/null 2>&1 \
+        && command -v kubectl >/dev/null 2>&1; then
+        KUBECONFIG="$KCFG"
+        export KUBECONFIG
+        listed=true
+        for i in $(seq 1 "$COUNT"); do
+          ns="$${PREFIX}-$${i}"
+          for svc in ${local.lb_services_shell}; do
+            typ=$(kubectl get svc "$svc" -n "$ns" -o jsonpath='{.spec.type}' 2>/dev/null || true)
+            if [ "$typ" = "LoadBalancer" ]; then
+              found="$${found}
+$${ns}/$${svc}"
+            fi
+          done
+        done
+      else
+        tagged=$(aws resourcegroupstaggingapi get-resources --region "$REGION" \
+          --resource-type-filters elasticloadbalancing:loadbalancer \
+          --tag-filters "Key=kubernetes.io/cluster/$${CLUSTER},Values=owned" \
+          --query "ResourceTagMappingList[].Tags[?Key=='kubernetes.io/service-name'].Value[]" \
+          --output text 2>/dev/null || true)
+        if [ -n "$tagged" ]; then
+          listed=true
+          found=$(printf '%s' "$tagged" | tr '\t' '\n')
+        fi
+      fi
+      if [ "$listed" = true ]; then
+        missing=0
+        for i in $(seq 1 "$COUNT"); do
+          ns="$${PREFIX}-$${i}"
+          for svc in ${local.lb_services_shell}; do
+            key="$${ns}/$${svc}"
+            if ! printf '%s\n' "$found" | grep -F -x -q "$key"; then
+              missing=$((missing + 1))
+            fi
+          done
+        done
+        echo "Network load balancers still to create: $missing of $((COUNT * ${local.nlb_per_namespace}))" >&2
+        NLB_NEED=$missing
+      else
+        echo "Could not list existing Services on $CLUSTER; not demanding a fresh set of balancers." >&2
+        NLB_NEED=0
+      fi
+
+      # A node that is NotReady, or a subnet with no free address once the CNI
+      # is already on a single warm IP, cannot run the pods this config names.
+      # Only a live kubeconfig counts. The tag fallback above can list Services
+      # without being able to see nodes.
+      if [ -n "$${KUBECONFIG:-}" ] && [ -f "$KUBECONFIG" ] && kubectl get ns kube-system >/dev/null 2>&1; then
+        nodes_known=true
+        ready_nodes=$(kubectl get nodes --no-headers 2>/dev/null | awk '$2=="Ready"{c++} END{print c+0}')
+        warm_ip=$(kubectl get ds aws-node -n kube-system -o jsonpath='{range .spec.template.spec.containers[0].env[*]}{.name}={.value}{"\n"}{end}' 2>/dev/null | awk -F= '$1=="WARM_IP_TARGET"{print $2}')
+        warm_ip=$${warm_ip:-unset}
+        placeable=false
+        if [ "$ready_nodes" -gt 0 ]; then
+          if [ "$warm_ip" != "1" ]; then
+            # This apply sets one warm IP and releases the full warm ENIs first.
+            placeable=true
+          else
+            SUBNETS=$(aws ec2 describe-instances --region "$REGION" \
+              --filters "Name=tag:eks:cluster-name,Values=$CLUSTER" "Name=instance-state-name,Values=running" \
+              --query 'Reservations[].Instances[].SubnetId' --output text | tr '\t' '\n' | sort -u)
+            for sn in $SUBNETS; do
+              [ -n "$sn" ] && [ "$sn" != "None" ] || continue
+              avail=$(aws ec2 describe-subnets --region "$REGION" --subnet-ids "$sn" --query 'Subnets[0].AvailableIpAddressCount' --output text 2>/dev/null || echo 0)
+              case "$avail" in
+                ''|*[!0-9]*) avail=0 ;;
+              esac
+              if [ "$avail" -ge 1 ]; then
+                placeable=true
+                break
+              fi
+            done
+          fi
+        fi
+
+        HANDLES=$(kubectl get pv -o jsonpath='{range .items[*]}{.spec.csi.volumeHandle}{"\n"}{end}' 2>/dev/null || true)
+        RESIDUE=$(mktemp)
+        VOLS=$(aws ec2 describe-volumes --region "$REGION" \
+          --filters "Name=tag:hpb-cluster,Values=$CLUSTER" "Name=status,Values=available" \
+          --query 'Volumes[].VolumeId' --output text 2>/dev/null || true)
+        for v in $VOLS; do
+          [ -n "$v" ] && [ "$v" != "None" ] || continue
+          if ! printf '%s\n' "$HANDLES" | grep -qx "$v"; then
+            orphan_volumes=$((orphan_volumes + 1))
+            echo "vol $v" >> "$RESIDUE"
+          fi
+        done
+
+        TAGS=$(aws resourcegroupstaggingapi get-resources --region "$REGION" \
+          --resource-type-filters elasticloadbalancing:loadbalancer \
+          --tag-filters "Key=kubernetes.io/cluster/$${CLUSTER},Values=owned" \
+          --query 'ResourceTagMappingList[].[ResourceARN, Tags[?Key==`kubernetes.io/service-name`].Value | [0]]' \
+          --output text 2>/dev/null || true)
+        SEEN=$(mktemp)
+        if [ -n "$TAGS" ] && [ "$TAGS" != "None" ]; then
+          printf '%s\n' "$TAGS" | while read -r arn svc; do
+            case "$arn" in
+              arn:aws:elasticloadbalancing:*) ;;
+              *) continue ;;
+            esac
+            case "$svc" in
+              */*) ;;
+              *) continue ;;
+            esac
+            ns=$${svc%%/*}
+            name=$${svc#*/}
+            if ! kubectl get svc "$name" -n "$ns" >/dev/null 2>&1; then
+              echo "lb $arn" >> "$RESIDUE"
+              case "$arn" in
+                *:loadbalancer/net/*) echo "$arn" >> "$KCFG.orphans" ;;
+              esac
+            elif grep -qx "$svc" "$SEEN"; then
+              echo "lb $arn" >> "$RESIDUE"
+            else
+              echo "$svc" >> "$SEEN"
+            fi
+          done || true
+          if [ -s "$KCFG.orphans" ]; then
+            orphan_nlbs=$(wc -l < "$KCFG.orphans" | tr -d ' ')
+          fi
+        fi
+        rm -f "$SEEN" "$KCFG.orphans"
+        if [ "$orphan_nlbs" -gt "$nlb_used" ]; then
+          orphan_nlbs=$nlb_used
+        fi
+        if command -v sha256sum >/dev/null 2>&1; then
+          residue=$(sha256sum "$RESIDUE" | awk '{print $1}')
+        else
+          residue=$(shasum -a 256 "$RESIDUE" | awk '{print $1}')
+        fi
+        rm -f "$RESIDUE"
+        echo "Ready nodes: $ready_nodes. Placeable: $placeable. Orphan NLBs: $orphan_nlbs. Unattached volumes: $orphan_volumes." >&2
+      fi
+      rm -f "$KCFG" "$KCFG.orphans"
+    fi
+
+    printf '{"cluster_exists":"%s","nodegroup_exists":"%s","live_min":"%s","live_max":"%s","live_desired":"%s","nlb_quota_known":"%s","nlb_quota":"%s","nlb_used":"%s","nlb_need":"%s","nodes_known":"%s","ready_nodes":"%s","placeable":"%s","orphan_nlbs":"%s","orphan_volumes":"%s","residue":"%s"}\n' \
+      "$cluster_exists" "$nodegroup_exists" "$live_min" "$live_max" "$live_desired" \
+      "$nlb_quota_known" "$nlb_quota" "$nlb_used" "$NLB_NEED" \
+      "$nodes_known" "$ready_nodes" "$placeable" "$orphan_nlbs" "$orphan_volumes" "$residue"
+  EOT
+  ]
+}
+
+resource "terraform_data" "preflight" {
+  lifecycle {
+    precondition {
+      condition = (
+        data.external.preflight.result.nodegroup_exists == "false" ||
+        var.node_min_size <= tonumber(data.external.preflight.result.live_desired)
+      )
+      error_message = "EKS rejects this before any node changes. The running desired size is ${data.external.preflight.result.live_desired}, and the node group update does not change desired size in that call. node_min_size is ${var.node_min_size}, which is above ${data.external.preflight.result.live_desired}. Set node_min_size to ${data.external.preflight.result.live_desired} or lower."
+    }
+
+    precondition {
+      condition = (
+        data.external.preflight.result.nodegroup_exists == "false" ||
+        tonumber(data.external.preflight.result.live_desired) <= var.node_max_size
+      )
+      error_message = "EKS rejects this before any node changes. The running desired size is ${data.external.preflight.result.live_desired}, which is above node_max_size ${var.node_max_size}. Raise node_max_size to at least ${data.external.preflight.result.live_desired}."
+    }
+
+    precondition {
+      condition = (
+        data.external.preflight.result.nodes_known == "false" ||
+        tonumber(data.external.preflight.result.ready_nodes) > 0
+      )
+      error_message = "Every node is NotReady, so a pod named by this config cannot start. Re-run terraform apply after a node is Ready. Do not destroy."
+    }
+
+    precondition {
+      condition     = data.external.preflight.result.placeable == "true"
+      error_message = "No Ready node can take another pod address. The node subnets have no free IP and the CNI is already keeping a single warm address, so the free count is the real capacity. Free an address and re-run terraform apply. Do not destroy."
+    }
+
+    precondition {
+      condition = (
+        data.external.preflight.result.nlb_quota_known == "false" ||
+        (tonumber(data.external.preflight.result.nlb_quota) - (tonumber(data.external.preflight.result.nlb_used) - tonumber(data.external.preflight.result.orphan_nlbs))) >= tonumber(data.external.preflight.result.nlb_need)
+      )
+      error_message = "Not enough network load balancers for the Services that do not exist yet. This apply still needs ${data.external.preflight.result.nlb_need}. Quota is ${data.external.preflight.result.nlb_quota}, ${data.external.preflight.result.nlb_used} are in use, and ${data.external.preflight.result.orphan_nlbs} of those belong to a Service that is already gone (this apply deletes those before creating the missing ones)."
+    }
+  }
+}
+
+# -----------------------------------------------------------------------------
 # 2. EKS — control plane, worker nodes, EBS CSI (for Postgres/Mongo/Kafka PVCs)
 # -----------------------------------------------------------------------------
 module "eks" {
@@ -379,7 +932,8 @@ module "eks" {
   subnet_ids = module.vpc.private_subnets
 
   # Create after wait_after_eks so destroy order is: EKS → leftover ENI/EBS drain → NAT/VPC.
-  depends_on = [null_resource.wait_after_eks]
+  # preflight fails the plan when the live node group or the NLB quota would reject the update.
+  depends_on = [null_resource.wait_after_eks, null_resource.nlb_quota, terraform_data.preflight]
 
   cluster_endpoint_public_access           = true
   enable_cluster_creator_admin_permissions = true
@@ -419,13 +973,159 @@ module "eks" {
       desired_size   = var.node_desired_size
       min_size       = var.node_min_size
       max_size       = var.node_max_size
+      # The module builds a custom launch template by default, and disk_size
+      # is ignored in that mode. AL2023 root volume is /dev/xvda.
+      block_device_mappings = {
+        xvda = {
+          device_name = "/dev/xvda"
+          ebs = {
+            volume_size           = var.node_disk_size
+            volume_type           = "gp3"
+            delete_on_termination = true
+          }
+        }
+      }
       timeouts = {
         delete = "30m"
+        update = "120m"
       }
     }
   }
 
   tags = local.common_tags
+}
+
+# The org AWS connector authenticates as this node role (InheritFromDelegate).
+# The EKS worker policies do not include ec2:DescribeRegions, so the connector
+# test fails. DescribeRegions is not resource-scoped.
+resource "aws_iam_role_policy" "node_describe_regions" {
+  name = "hpb-delegate-describe-regions"
+  role = module.eks.eks_managed_node_groups["main"].iam_role_name
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = ["ec2:DescribeRegions", "ec2:DescribeAvailabilityZones"]
+      Resource = "*"
+    }]
+  })
+}
+
+# Fail before the node-group update if this region cannot hold one network
+# load balancer for frontend, gateway-service-external, Prometheus, and
+# Grafana in every namespace. Classic ELB quota is 20; 10 namespaces need 40
+# NLBs, so the Services are NLBs.
+resource "null_resource" "nlb_quota" {
+  triggers = {
+    region          = var.aws_region
+    namespace_count = tostring(var.namespace_count)
+  }
+
+  provisioner "local-exec" {
+    interpreter = ["/bin/bash", "-c"]
+    command     = <<-EOT
+      set -euo pipefail
+      REGION=${jsonencode(var.aws_region)}
+      CLUSTER=${jsonencode(var.cluster_name)}
+      PREFIX=${jsonencode(var.namespace_prefix)}
+      COUNT=${var.namespace_count}
+      NEED=$((COUNT * ${local.nlb_per_namespace}))
+      KCFG=$(mktemp)
+      if aws eks update-kubeconfig --kubeconfig "$KCFG" --name "$CLUSTER" --region "$REGION" >/dev/null 2>&1 \
+        && command -v kubectl >/dev/null 2>&1; then
+        KUBECONFIG="$KCFG"
+        export KUBECONFIG
+        NEED=0
+        for i in $(seq 1 "$COUNT"); do
+          ns="$${PREFIX}-$${i}"
+          for svc in ${local.lb_services_shell}; do
+            typ=$(kubectl get svc "$svc" -n "$ns" -o jsonpath='{.spec.type}' 2>/dev/null || true)
+            if [ "$typ" != "LoadBalancer" ]; then
+              NEED=$((NEED + 1))
+            fi
+          done
+        done
+      fi
+      rm -f "$KCFG"
+      QUOTA=$(aws service-quotas get-service-quota \
+        --service-code elasticloadbalancing \
+        --quota-code L-69A177A2 \
+        --region "$REGION" \
+        --query 'Quota.Value' --output text 2>/dev/null || true)
+      if [ -z "$QUOTA" ] || [ "$QUOTA" = "None" ]; then
+        echo "Could not read the NLB quota; continuing. This apply still needs $NEED network load balancers."
+        exit 0
+      fi
+      QUOTA_INT="$${QUOTA%%.*}"
+      USED=$(aws elbv2 describe-load-balancers --region "$REGION" \
+        --query "length(LoadBalancers[?Type=='network'])" --output text)
+      FREE=$(( QUOTA_INT - USED ))
+      echo "NLB quota $QUOTA_INT, in use $USED, free $FREE, still to create $NEED"
+      if [ "$FREE" -lt "$NEED" ]; then
+        echo "Not enough free network load balancers in $REGION for the Services that do not exist yet."
+        exit 1
+      fi
+    EOT
+  }
+}
+
+# The EKS module ignores scaling_config.desired_size on update, and EKS
+# rejects a minimum above the live desired count. Terraform therefore only
+# raises max_size here. This step then raises desired, after max is already
+# high enough (desired 12 is illegal while max is still 8).
+resource "null_resource" "scale_nodegroup" {
+  triggers = {
+    cluster  = module.eks.cluster_name
+    region   = var.aws_region
+    desired  = tostring(var.node_desired_size)
+    max_size = tostring(var.node_max_size)
+  }
+
+  provisioner "local-exec" {
+    interpreter = ["/bin/bash", "-c"]
+    command     = <<-EOT
+      set -euo pipefail
+      REGION=${jsonencode(var.aws_region)}
+      CLUSTER=${jsonencode(module.eks.cluster_name)}
+      TARGET=${var.node_desired_size}
+      NGS=$(aws eks list-nodegroups --cluster-name "$CLUSTER" --region "$REGION" --query 'nodegroups' --output text)
+      for NG in $NGS; do
+        case "$NG" in
+          main-*) ;;
+          *) continue ;;
+        esac
+        echo "Waiting for node group $NG to be ACTIVE before changing its desired size"
+        aws eks wait nodegroup-active --cluster-name "$CLUSTER" --nodegroup-name "$NG" --region "$REGION"
+        SCALING=$(aws eks describe-nodegroup --cluster-name "$CLUSTER" --nodegroup-name "$NG" --region "$REGION" --query 'nodegroup.scalingConfig.[minSize,maxSize,desiredSize]' --output text)
+        MIN=$(echo "$SCALING" | awk '{print $1}')
+        MAX=$(echo "$SCALING" | awk '{print $2}')
+        DESIRED=$(echo "$SCALING" | awk '{print $3}')
+        echo "Node group $NG scaling min=$MIN max=$MAX desired=$DESIRED target=$TARGET"
+        if [ "$DESIRED" -eq "$TARGET" ]; then
+          echo "Desired size is already $TARGET"
+          continue
+        fi
+        if [ "$TARGET" -gt "$MAX" ]; then
+          echo "Refusing to set desired $TARGET above live max $MAX on $NG"
+          exit 1
+        fi
+        if [ "$TARGET" -lt "$MIN" ]; then
+          echo "Refusing to set desired $TARGET below live min $MIN on $NG"
+          exit 1
+        fi
+        aws eks update-nodegroup-config \
+          --cluster-name "$CLUSTER" \
+          --nodegroup-name "$NG" \
+          --region "$REGION" \
+          --scaling-config "minSize=$MIN,maxSize=$MAX,desiredSize=$TARGET"
+        aws eks wait nodegroup-active --cluster-name "$CLUSTER" --nodegroup-name "$NG" --region "$REGION"
+        echo "Node group $NG desired size is $TARGET"
+      done
+    EOT
+  }
+
+  depends_on = [module.eks]
 }
 
 module "ebs_csi_irsa" {
@@ -535,17 +1235,232 @@ resource "null_resource" "wait_ebs_csi" {
 
   depends_on = [
     module.eks,
+    null_resource.scale_nodegroup,
     kubernetes_storage_class_v1.gp3,
     null_resource.unset_gp2_default,
   ]
+}
+
+# Default VPC CNI keeps a spare ENI (15 addresses) on every node. The private
+# subnets are /24, so that spare pool fills the subnet while nodes still report
+# free pod slots. One warm address lets the next pod take a real free IP.
+resource "null_resource" "vpc_cni_warm_ip" {
+  triggers = {
+    cluster = module.eks.cluster_name
+    warm    = "1"
+  }
+
+  provisioner "local-exec" {
+    interpreter = ["/bin/bash", "-c"]
+    command     = <<-EOT
+      set -euo pipefail
+      ${local.kubeconfig}
+      if ! kubectl get ds aws-node -n kube-system >/dev/null 2>&1; then
+        echo "aws-node is not installed; pods cannot get addresses"
+        exit 1
+      fi
+      current=$(kubectl get ds aws-node -n kube-system -o jsonpath='{range .spec.template.spec.containers[0].env[*]}{.name}={.value}{"\n"}{end}' | awk -F= '$1=="WARM_IP_TARGET"{print $2}')
+      if [ "$current" = "1" ]; then
+        echo "aws-node WARM_IP_TARGET is already 1"
+        exit 0
+      fi
+      echo "Setting aws-node WARM_IP_TARGET=1 before workloads are applied"
+      kubectl set env daemonset/aws-node -n kube-system WARM_IP_TARGET=1
+      kubectl rollout status daemonset/aws-node -n kube-system --timeout=180s
+    EOT
+  }
+
+  depends_on = [null_resource.wait_ebs_csi]
+}
+
+# A failed apply can leave a balancer whose Service is gone, or an EBS volume
+# no PV still points at. Both keep costing money and both count against the
+# quota the next apply needs. Same names are never created twice; this only
+# removes what the cluster no longer references.
+resource "null_resource" "reclaim_residue" {
+  triggers = {
+    cluster = module.eks.cluster_name
+    residue = data.external.preflight.result.residue
+  }
+
+  provisioner "local-exec" {
+    interpreter = ["/bin/bash", "-c"]
+    command     = <<-EOT
+      set -euo pipefail
+      ${local.kubeconfig}
+      REGION=${jsonencode(var.aws_region)}
+      CLUSTER=${jsonencode(var.cluster_name)}
+      if ! kubectl get ns kube-system >/dev/null 2>&1; then
+        echo "Cannot list the cluster; leaving AWS resources alone"
+        exit 0
+      fi
+
+      delete_lb() {
+        local arn="$1" name
+        case "$arn" in
+          *:loadbalancer/net/*|*:loadbalancer/app/*)
+            echo "Deleting leftover balancer $arn"
+            aws elbv2 delete-load-balancer --region "$REGION" --load-balancer-arn "$arn" || true
+            ;;
+          *)
+            name=$(printf '%s' "$arn" | awk -F/ '{print $NF}')
+            echo "Deleting leftover classic balancer $name"
+            aws elb delete-load-balancer --region "$REGION" --load-balancer-name "$name" || true
+            ;;
+        esac
+      }
+
+      TAGS=$(aws resourcegroupstaggingapi get-resources --region "$REGION" \
+        --resource-type-filters elasticloadbalancing:loadbalancer \
+        --tag-filters "Key=kubernetes.io/cluster/$${CLUSTER},Values=owned" \
+        --query 'ResourceTagMappingList[].[ResourceARN, Tags[?Key==`kubernetes.io/service-name`].Value | [0]]' \
+        --output text 2>/dev/null || true)
+      if [ -n "$TAGS" ] && [ "$TAGS" != "None" ]; then
+        pairs=$(mktemp)
+        printf '%s\n' "$TAGS" > "$pairs"
+        awk '{print $2}' "$pairs" | sort -u | while read -r svc; do
+          case "$svc" in
+            */*) ;;
+            *) continue ;;
+          esac
+          ns=$${svc%%/*}
+          name=$${svc#*/}
+          arn_list=$(awk -v s="$svc" '$2==s {print $1}' "$pairs")
+          if ! kubectl get svc "$name" -n "$ns" >/dev/null 2>&1; then
+            for arn in $arn_list; do
+              delete_lb "$arn"
+            done
+            continue
+          fi
+          n=0
+          for arn in $arn_list; do
+            n=$((n + 1))
+          done
+          [ "$n" -le 1 ] && continue
+          host=$(kubectl get svc "$name" -n "$ns" -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
+          host=$${host%.}
+          keep=""
+          keep_time=""
+          for arn in $arn_list; do
+            case "$arn" in
+              *:loadbalancer/net/*|*:loadbalancer/app/*)
+                meta=$(aws elbv2 describe-load-balancers --region "$REGION" --load-balancer-arns "$arn" --query 'LoadBalancers[0].[DNSName,CreatedTime]' --output text 2>/dev/null || true)
+                ;;
+              *)
+                lbname=$(printf '%s' "$arn" | awk -F/ '{print $NF}')
+                meta=$(aws elb describe-load-balancers --region "$REGION" --load-balancer-names "$lbname" --query 'LoadBalancerDescriptions[0].[DNSName,CreatedTime]' --output text 2>/dev/null || true)
+                ;;
+            esac
+            dns=$(printf '%s' "$meta" | awk '{print $1}')
+            ts=$(printf '%s' "$meta" | awk '{print $2}')
+            dns=$${dns%.}
+            if [ -n "$host" ] && [ "$dns" = "$host" ]; then
+              keep="$arn"
+            fi
+            if [ -z "$keep" ] || [[ "$ts" < "$keep_time" ]]; then
+              if [ -z "$host" ] || [ -z "$keep" ]; then
+                keep="$arn"
+                keep_time="$ts"
+              fi
+            fi
+          done
+          for arn in $arn_list; do
+            [ "$arn" = "$keep" ] && continue
+            delete_lb "$arn"
+          done
+        done
+        rm -f "$pairs"
+      fi
+
+      TGS=$(aws resourcegroupstaggingapi get-resources --region "$REGION" \
+        --resource-type-filters elasticloadbalancing:targetgroup \
+        --tag-filters "Key=kubernetes.io/cluster/$${CLUSTER},Values=owned" \
+        --query 'ResourceTagMappingList[].[ResourceARN, Tags[?Key==`kubernetes.io/service-name`].Value | [0]]' \
+        --output text 2>/dev/null || true)
+      if [ -n "$TGS" ] && [ "$TGS" != "None" ]; then
+        printf '%s\n' "$TGS" | while read -r arn svc; do
+          [ -n "$arn" ] && [ "$arn" != "None" ] || continue
+          case "$svc" in
+            */*) ;;
+            *) continue ;;
+          esac
+          ns=$${svc%%/*}
+          name=$${svc#*/}
+          if ! kubectl get svc "$name" -n "$ns" >/dev/null 2>&1; then
+            echo "Deleting leftover target group $arn"
+            aws elbv2 delete-target-group --region "$REGION" --target-group-arn "$arn" 2>/dev/null || true
+          fi
+        done
+      fi
+
+      HANDLES=$(kubectl get pv -o jsonpath='{range .items[*]}{.spec.csi.volumeHandle}{"\n"}{end}' 2>/dev/null || true)
+      VOLS=$(aws ec2 describe-volumes --region "$REGION" \
+        --filters "Name=tag:hpb-cluster,Values=$CLUSTER" "Name=status,Values=available" \
+        --query 'Volumes[].VolumeId' --output text 2>/dev/null || true)
+      for v in $VOLS; do
+        [ -n "$v" ] && [ "$v" != "None" ] || continue
+        if ! printf '%s\n' "$HANDLES" | grep -qx "$v"; then
+          echo "Deleting unattached volume $v"
+          aws ec2 delete-volume --region "$REGION" --volume-id "$v" || true
+        fi
+      done
+    EOT
+  }
+
+  depends_on = [null_resource.wait_ebs_csi]
 }
 
 # -----------------------------------------------------------------------------
 # 4. Namespaces — prefix-1 .. prefix-N
 # -----------------------------------------------------------------------------
 
+# Destroyed before the namespace. Deleting the namespace object while its
+# LoadBalancer Services still exist leaves the NLBs and their security groups
+# behind. This removes those Services first and waits until the hostnames are
+# gone. It does not run on a full cluster destroy; destroy_lb_drain does that.
+resource "null_resource" "namespace_loadbalancers" {
+  for_each = var.manage_namespaces ? toset(local.namespace_names) : toset([])
+
+  triggers = {
+    namespace    = each.value
+    aws_region   = var.aws_region
+    cluster_name = var.cluster_name
+  }
+
+  depends_on = [
+    kubernetes_namespace_v1.banking,
+    null_resource.hpb_apply,
+    null_resource.wait_for_lbs,
+  ]
+
+  provisioner "local-exec" {
+    when        = destroy
+    on_failure  = continue
+    interpreter = ["/bin/bash", "-c"]
+    command     = <<-EOT
+      set -euo pipefail
+      REGION="${self.triggers.aws_region}"
+      CLUSTER="${self.triggers.cluster_name}"
+      NS="${self.triggers.namespace}"
+      aws eks update-kubeconfig --region "$REGION" --name "$CLUSTER" >/dev/null 2>&1 || exit 0
+      kubectl get ns "$NS" >/dev/null 2>&1 || exit 0
+      kubectl get svc -n "$NS" -o json | python3 -c '
+import json,sys
+data=json.load(sys.stdin)
+for item in data.get("items") or []:
+    if (item.get("spec") or {}).get("type")=="LoadBalancer":
+        print(item["metadata"]["name"])
+' | while read -r svc; do
+        [ -n "$svc" ] || continue
+        echo "Deleting LoadBalancer service $NS/$svc"
+        kubectl delete svc "$svc" -n "$NS" --wait=true --timeout=180s || true
+      done
+    EOT
+  }
+}
+
 resource "kubernetes_namespace_v1" "banking" {
-  for_each = toset(local.namespace_names)
+  for_each = var.manage_namespaces ? toset(local.namespace_names) : toset([])
 
   wait_for_default_service_account = true
 
@@ -575,6 +1490,7 @@ resource "null_resource" "hpb_cluster_scoped" {
     aws_region     = var.aws_region
     namespace      = local.namespace_names[0]
     cluster_role   = local.prometheus_cluster_role
+    lb_type        = "nlb"
   }
 
   provisioner "local-exec" {
@@ -582,8 +1498,18 @@ resource "null_resource" "hpb_cluster_scoped" {
     command     = <<-EOT
       set -euo pipefail
       ${local.kubeconfig} >/dev/null
-      echo "Applying cluster-scoped Prometheus objects once (${local.namespace_names[0]})"
-      kubectl apply -f "${local.manifests_abs}/prometheus.yaml" -n "${local.namespace_names[0]}"
+      ${local.kubectl_apply_helpers}
+      WORK=$(mktemp -d)
+      trap 'rm -rf "$WORK"' EXIT
+      # One apply of the shared ClusterRole. Per-namespace applies omit it so
+      # ten parallel applies do not race on AlreadyExists. Skip the manifest
+      # ClusterRoleBinding (it targets namespace "banking").
+      keep_cluster_scoped "${local.manifests_abs}/prometheus.yaml" "$WORK/cluster-all.yaml"
+      keep_kind "$WORK/cluster-all.yaml" ClusterRole "$WORK/cluster.yaml"
+      if [ -s "$WORK/cluster.yaml" ]; then
+        echo "Applying cluster-scoped Prometheus ClusterRole once"
+        apply_ignore_exists "$WORK/cluster.yaml"
+      fi
     EOT
   }
 
@@ -613,6 +1539,7 @@ resource "null_resource" "hpb_apply" {
     aws_region     = var.aws_region
     cluster_name   = module.eks.cluster_name
     manifests_hash = local.manifests_hash
+    lb_type        = "nlb"
   }
 
   provisioner "local-exec" {
@@ -627,28 +1554,59 @@ resource "null_resource" "hpb_apply" {
       fi
 
       ${local.kubeconfig}
+      ${local.kubectl_apply_helpers}
+
+      # Vendored YAML stays untouched. Copy it and annotate the
+      # LoadBalancer Services as NLBs before they are created. Classic ELB
+      # quota (20) cannot hold 10 namespaces x 4 balancers.
+      WORK=$(mktemp -d)
+      trap 'rm -rf "$WORK"' EXIT
+      cp -R "$DIR/." "$WORK/"
+      patch_nlb() {
+        awk '
+          /^---$/ { in_svc=0; in_meta=0; injected=0 }
+          /^kind: Service$/ { in_svc=1 }
+          in_svc && /^metadata:$/ { in_meta=1 }
+          in_svc && in_meta && /^spec:$/ && !injected {
+            print "  annotations:"
+            print "    service.beta.kubernetes.io/aws-load-balancer-type: nlb"
+            injected=1
+          }
+          { print }
+        ' "$1" > "$2"
+      }
+      for f in ${local.lb_manifest_files_shell}; do
+        patch_nlb "$DIR/$f" "$WORK/$f"
+      done
+      for f in "$WORK"/*.yaml "$WORK"/*.yml; do
+        [ -f "$f" ] || continue
+        tmp=$(mktemp)
+        drop_cluster_scoped "$f" "$tmp"
+        if [ -s "$tmp" ]; then
+          mv "$tmp" "$f"
+        else
+          rm -f "$tmp" "$f"
+        fi
+      done
+      # Same names are updated in place. An existing Service keeps its balancer
+      # so a retry cannot create a second one beside it.
+      keep_existing_balancer "$WORK/frontend-service.yaml" "$NS" frontend-service
+      keep_existing_balancer "$WORK/gateway-service-external.yaml" "$NS" gateway-service-external
+      keep_existing_balancer "$WORK/prometheus.yaml" "$NS" prometheus
+      keep_existing_balancer "$WORK/grafana-all-in-one.yaml" "$NS" grafana
 
       # Secrets/config/PVCs first so StatefulSets always have a claim to bind.
-      kubectl apply -f "$DIR/secrets.yaml" -n "$NS"
-      kubectl apply -f "$DIR/configmap.yaml" -n "$NS"
-      kubectl apply -f "$DIR/persistent-volumes.yaml" -n "$NS"
+      apply_with_repair "$WORK/secrets.yaml" "$NS" "$WORK"
+      apply_with_repair "$WORK/configmap.yaml" "$NS" "$WORK"
+      apply_with_repair "$WORK/persistent-volumes.yaml" "$NS" "$WORK"
 
-      apply_ok=0
-      for attempt in $(seq 1 5); do
-        if kubectl apply -f "$DIR" -n "$NS"; then
-          apply_ok=1
-          break
-        fi
-        echo "apply attempt $attempt for namespace $NS failed; retrying"
-        sleep $((attempt * 5))
-      done
-      if [ "$apply_ok" -ne 1 ]; then
-        echo "apply failed for namespace $NS after 5 attempts"
-        kubectl get all,pvc,secret,cm -n "$NS" || true
+      if ! apply_with_repair "$WORK" "$NS" "$WORK"; then
+        echo "apply failed for namespace $NS"
         exit 1
       fi
+      drop_orphan_balancers "$NS" ${jsonencode(var.aws_region)}
 
-      for kind in "secret/banking-secrets" "pvc/postgresql-pvc" "pvc/mongodb-pvc" "pvc/kafka-pvc" "statefulset/postgresql" "statefulset/mongodb" "statefulset/kafka"; do
+      for kind in "secret/banking-secrets" "pvc/postgresql-pvc" "pvc/mongodb-pvc" "pvc/kafka-pvc" "statefulset/postgresql" "statefulset/mongodb" "statefulset/kafka" "deployment/grafana" "deployment/load-generator" "svc/gateway-service-external" "svc/grafana" "svc/prometheus"; do
         if ! kubectl get $kind -n "$NS" >/dev/null 2>&1; then
           echo "[$NS] expected $kind after apply, but it is missing"
           kubectl get all,pvc,secret -n "$NS" || true
@@ -663,6 +1621,8 @@ resource "null_resource" "hpb_apply" {
     kubernetes_storage_class_v1.gp3,
     null_resource.unset_gp2_default,
     null_resource.wait_ebs_csi,
+    null_resource.vpc_cni_warm_ip,
+    null_resource.reclaim_residue,
     null_resource.hpb_cluster_scoped,
   ]
 }
@@ -709,6 +1669,7 @@ resource "null_resource" "app_bootstrap" {
       TIMEOUT="${local.app_ready_timeout}"
 
       ${local.kubeconfig}
+      ${local.kubectl_apply_helpers}
 
       fail_ns() {
         echo "[$NS] $*"
@@ -718,11 +1679,11 @@ resource "null_resource" "app_bootstrap" {
       }
 
       ensure_data_manifests() {
-        kubectl apply -f "$DIR/secrets.yaml" -n "$NS" >/dev/null
-        kubectl apply -f "$DIR/persistent-volumes.yaml" -n "$NS" >/dev/null
-        kubectl apply -f "$DIR/postgresql.yaml" -n "$NS" >/dev/null
-        kubectl apply -f "$DIR/mongodb.yaml" -n "$NS" >/dev/null
-        kubectl apply -f "$DIR/kafka.yaml" -n "$NS" >/dev/null
+        apply_with_repair "$DIR/secrets.yaml" "$NS" "$DIR" >/dev/null
+        apply_with_repair "$DIR/persistent-volumes.yaml" "$NS" "$DIR" >/dev/null
+        apply_with_repair "$DIR/postgresql.yaml" "$NS" "$DIR" >/dev/null
+        apply_with_repair "$DIR/mongodb.yaml" "$NS" "$DIR" >/dev/null
+        apply_with_repair "$DIR/kafka.yaml" "$NS" "$DIR" >/dev/null
       }
 
       echo "[$NS] ensuring secrets and data-plane manifests"
@@ -861,9 +1822,9 @@ resource "null_resource" "app_bootstrap" {
 # -----------------------------------------------------------------------------
 # 7. Make the manifest's Prometheus configuration namespace-aware
 # -----------------------------------------------------------------------------
-# Source manifests are left unchanged. They share a ClusterRole but hardcode
-# namespace "banking" in service discovery and the ClusterRoleBinding. Add one
-# uniquely named binding per namespace and rewrite only the live ConfigMap.
+# ClusterRole is applied once. Manifests hardcode namespace "banking" in
+# service discovery and the ClusterRoleBinding. Add one uniquely named
+# binding per namespace and rewrite only the live ConfigMap.
 
 resource "null_resource" "prometheus_namespace_config" {
   for_each = local.deploy_namespaces
@@ -879,6 +1840,7 @@ resource "null_resource" "prometheus_namespace_config" {
     cluster_role         = local.prometheus_cluster_role
     manifest_namespace   = local.prometheus_manifest_namespace
     cluster_role_binding = "${local.prometheus_cluster_role}-${each.value}"
+    rbac_version         = "v3-crb-replace"
   }
 
   provisioner "local-exec" {
@@ -889,14 +1851,23 @@ resource "null_resource" "prometheus_namespace_config" {
       trap 'rm -rf "$TMP"' EXIT
 
       ${local.kubeconfig}
+      ${local.kubectl_apply_helpers}
 
+      keep_cluster_scoped "${local.manifests_abs}/prometheus.yaml" "$TMP/cluster-all.yaml"
+      keep_kind "$TMP/cluster-all.yaml" ClusterRole "$TMP/clusterrole.yaml"
+      if [ -s "$TMP/clusterrole.yaml" ]; then
+        apply_ignore_exists "$TMP/clusterrole.yaml"
+      fi
+
+      # Manifest CRB is named "prometheus" and targets namespace "banking".
+      # Replace it with one binding per real namespace.
+      kubectl delete clusterrolebinding "${local.prometheus_cluster_role}" --ignore-not-found=true
+      kubectl delete clusterrolebinding "${local.prometheus_cluster_role}-${each.value}" --ignore-not-found=true
       kubectl create clusterrolebinding "${local.prometheus_cluster_role}-${each.value}" \
         --clusterrole="${local.prometheus_cluster_role}" \
         --serviceaccount="${each.value}:${local.prometheus_service_account}" \
-        --dry-run=client -o yaml | kubectl apply -f -
-
-      # Manifest CRB points at namespace "banking", which this stack does not create.
-      kubectl delete clusterrolebinding "${local.prometheus_cluster_role}" --ignore-not-found=true
+        --dry-run=client -o yaml > "$TMP/crb.yaml"
+      apply_ignore_exists "$TMP/crb.yaml"
 
       kubectl get configmap "${local.prometheus_config_map}" \
         --namespace "${each.value}" \
@@ -909,7 +1880,7 @@ resource "null_resource" "prometheus_namespace_config" {
       kubectl create configmap "${local.prometheus_config_map}" \
         --namespace "${each.value}" \
         --from-file=prometheus.yml="$TMP/prometheus-updated.yml" \
-        --dry-run=client -o yaml | kubectl apply -f -
+        --dry-run=client -o yaml | kubectl apply --validate=false -f -
 
       kubectl rollout restart deployment/"${local.prometheus_deployment}" --namespace "${each.value}"
       kubectl rollout status deployment/"${local.prometheus_deployment}" \
@@ -949,7 +1920,7 @@ resource "null_resource" "wait_for_lbs" {
       set -euo pipefail
       ${local.kubeconfig}
       NS="${each.value}"
-      for svc in ${local.frontend_deployment} ${local.gateway_service} ${local.prometheus_service}; do
+      for svc in ${local.lb_services_shell}; do
         echo "Waiting for LoadBalancer on $svc in $NS"
         for i in $(seq 1 90); do
           HOST=$(kubectl get svc "$svc" -n "$NS" -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
@@ -987,7 +1958,17 @@ data "kubernetes_service_v1" "gateway" {
   depends_on = [null_resource.wait_for_lbs]
 
   metadata {
-    name      = local.gateway_service
+    name      = local.gateway_external_service
+    namespace = each.value
+  }
+}
+
+data "kubernetes_service_v1" "grafana" {
+  for_each   = local.deploy_namespaces
+  depends_on = [null_resource.wait_for_lbs]
+
+  metadata {
+    name      = local.grafana_service
     namespace = each.value
   }
 }
@@ -1040,7 +2021,7 @@ resource "null_resource" "frontend_gateway_url" {
 # -----------------------------------------------------------------------------
 # 10. Drain Kubernetes LoadBalancers before VPC destroy
 # -----------------------------------------------------------------------------
-# Frontend / gateway / prometheus Services create classic ELBs and k8s-elb
+# Frontend / gateway-service-external / prometheus / grafana Services create NLBs and k8s-elb
 # security groups that are NOT in Terraform state. This resource is created
 # last, so it is destroyed first while the cluster still exists. It deletes
 # app namespaces, then waits until AWS ELBs and ELB ENIs are gone.
@@ -1053,6 +2034,8 @@ resource "null_resource" "destroy_lb_drain" {
     null_resource.wait_after_eks,
     null_resource.unset_gp2_default,
     null_resource.wait_ebs_csi,
+    kubernetes_storage_class_v1.gp3,
+    null_resource.scale_nodegroup,
     null_resource.hpb_cluster_scoped,
     null_resource.hpb_apply,
     null_resource.app_bootstrap,
@@ -1103,23 +2086,46 @@ resource "null_resource" "destroy_lb_drain" {
         done
         echo "Tracking PV-backed EBS volumes:$${VOL_IDS:- <none>}"
 
-        # Delete LoadBalancer Services first so AWS starts ELB teardown while
-        # namespace termination continues in parallel.
+        # Order: Service (releases the AWS balancer) -> RoleBinding -> Role ->
+        # namespace -> Released PV. A namespace delete blocks on a Service
+        # finalizer, and a ClusterRole cannot go while a binding still points
+        # at it.
         for ns in $NS_LIST; do
           echo "Deleting LoadBalancer Services in $ns"
           kubectl delete svc -n "$ns" --field-selector spec.type=LoadBalancer --wait=false --ignore-not-found=true || true
         done
+        for i in $(seq 1 36); do
+          left=""
+          for ns in $NS_LIST; do
+            got=$(kubectl get svc -n "$ns" --field-selector spec.type=LoadBalancer -o name 2>/dev/null || true)
+            [ -n "$got" ] && left="$left $ns"
+          done
+          [ -z "$left" ] && break
+          echo "Waiting for LoadBalancer Services to go away:$left"
+          sleep 10
+        done
 
-        kubectl delete clusterrolebinding prometheus --ignore-not-found=true || true
-        kubectl delete clusterrole prometheus --ignore-not-found=true || true
         for ns in $NS_LIST; do
           kubectl delete clusterrolebinding "prometheus-$ns" --ignore-not-found=true || true
         done
+        kubectl delete clusterrolebinding prometheus --ignore-not-found=true || true
+        kubectl delete clusterrole prometheus --ignore-not-found=true || true
 
         for ns in $NS_LIST; do
           echo "Deleting namespace $ns"
           kubectl delete namespace "$ns" --ignore-not-found=true --wait=true --timeout=25m || true
         done
+
+        kubectl get pv -o jsonpath='{range .items[*]}{.metadata.name}{","}{.status.phase}{","}{.spec.claimRef.namespace}{"\n"}{end}' 2>/dev/null \
+          | while IFS=, read -r pv phase claim_ns; do
+              [ "$phase" = "Released" ] || [ "$phase" = "Failed" ] || continue
+              for ns in $NS_LIST; do
+                if [ "$claim_ns" = "$ns" ]; then
+                  echo "Deleting $phase persistent volume $pv from $ns"
+                  kubectl delete pv "$pv" --wait=false --ignore-not-found=true || true
+                fi
+              done
+            done || true
       else
         echo "Cluster $CLUSTER already gone; draining leftover AWS LoadBalancers"
       fi
@@ -1151,6 +2157,16 @@ resource "null_resource" "destroy_lb_drain" {
           if [ -n "$arn" ] && [ "$arn" != "None" ]; then
             echo "Deleting ELBv2 $arn"
             aws elbv2 delete-load-balancer --load-balancer-arn "$arn" || true
+          fi
+        done
+
+        TGS=$(aws elbv2 describe-target-groups \
+          --query "TargetGroups[?VpcId=='$VPC'].TargetGroupArn" \
+          --output text 2>/dev/null || true)
+        for tg in $TGS; do
+          if [ -n "$tg" ] && [ "$tg" != "None" ]; then
+            echo "Deleting target group $tg"
+            aws elbv2 delete-target-group --target-group-arn "$tg" 2>/dev/null || true
           fi
         done
       }
@@ -1244,10 +2260,14 @@ resource "null_resource" "destroy_lb_drain" {
         SGS=$(aws ec2 describe-security-groups --filters "Name=vpc-id,Values=$VPC" \
           --query "SecurityGroups[?starts_with(GroupName, 'k8s-elb-')].GroupId" \
           --output text 2>/dev/null || true)
+        TAGGED_SGS=$(aws ec2 describe-security-groups --filters "Name=vpc-id,Values=$VPC" "Name=tag-key,Values=kubernetes.io/service-name" \
+          --query "SecurityGroups[].GroupId" --output text 2>/dev/null || true)
+        SGS="$SGS $TAGGED_SGS"
         if [ -z "$SGS" ] || [ "$SGS" = "None" ]; then
           break
         fi
         for sg in $SGS; do
+          [ -z "$sg" ] || [ "$sg" = "None" ] && continue
           echo "Deleting leftover SG $sg"
           aws ec2 delete-security-group --group-id "$sg" 2>/dev/null || true
         done
@@ -1272,11 +2292,15 @@ output "vpc_id" {
 }
 
 output "namespaces" {
-  value = sort(keys(kubernetes_namespace_v1.banking))
+  # range() order, not sort(). sort() places banking-10 before banking-2.
+  value = [
+    for ns in local.namespace_names : ns
+    if contains(keys(kubernetes_namespace_v1.banking), ns)
+  ]
 }
 
 output "service_endpoints" {
-  description = "Frontend / gateway / prometheus URLs per namespace"
+  description = "Frontend / gateway / prometheus / grafana URLs per namespace"
   value       = local.service_endpoints
 }
 

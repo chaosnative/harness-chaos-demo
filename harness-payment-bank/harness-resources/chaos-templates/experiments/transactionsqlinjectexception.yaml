@@ -1,0 +1,169 @@
+name: transaction-sql-inject-exception
+identity: transactionsqlinjectexception
+description: Injects SQL exceptions on SELECT operations against the transactions
+  table (Hibernate ORM) in the transaction-service for 120s. Validates transaction
+  API health, transaction integrity, user account API, Kafka message error counts,
+  and Kafka topic message age across 3 pipeline stages.
+tags:
+- hpb
+kind: ChaosExperimentTemplate
+apiVersion: litmuschaos.io/v1beta1
+spec:
+  infraType: KubernetesV2
+  faults:
+  - name: pod-jvm-sql-exception-94o
+    identity: pod-jvm-sql-exception
+    revision: v1
+    isEnterprise: true
+    values:
+    - name: TARGET_WORKLOAD_KIND
+      value: deployment
+    - name: TARGET_WORKLOAD_NAMES
+      value: transaction-service
+    - name: TOTAL_CHAOS_DURATION
+      value: 120
+    - name: TABLE
+      value: transactions
+    - name: SQL_OPERATION
+      value: select
+    - name: SQL_DATA_ACCESS_FRAMEWORK
+      value: HIBERNATE
+    - name: TARGET_WORKLOAD_NAMESPACE
+      value: <+experiment.variables.TARGET_NAMESPACE>
+    authEnabled: false
+  probes:
+  - name: hpb-transation-svc-health-check-g2c-g2c
+    identity: hpb-transation-svc-health-check
+    isEnterprise: false
+    weightage: 10
+    duration: 30s
+    enableDataCollection: false
+    values:
+    - name: URL
+      value: http://gateway-service.<+experiment.variables.TARGET_NAMESPACE>:8080/api/v1/transactions/account/1?page=0&size=20&sort=createdAt,desc
+    - name: AUTH_CREDENTIALS
+      value: __BEARER_TOKEN__
+  - name: hpb-transation-svc-health-check-yoy-yoy
+    identity: hpb-transation-svc-health-check
+    isEnterprise: false
+    weightage: 10
+    duration: 30s
+    enableDataCollection: false
+    values:
+    - name: AUTH_CREDENTIALS
+      value: __BEARER_TOKEN__
+    - name: URL
+      value: http://gateway-service.<+experiment.variables.TARGET_NAMESPACE>:8080/api/v1/transactions/account/1?page=0&size=20&sort=createdAt,desc
+  - name: hpb-transation-svc-health-check-9oj-9oj
+    identity: hpb-transation-svc-health-check
+    isEnterprise: false
+    weightage: 10
+    duration: 30s
+    enableDataCollection: false
+    values:
+    - name: URL
+      value: http://gateway-service.<+experiment.variables.TARGET_NAMESPACE>:8080/api/v1/transactions/account/1?page=0&size=20&sort=createdAt,desc
+    - name: AUTH_CREDENTIALS
+      value: __BEARER_TOKEN__
+  - name: hpb-transaction-validation-pno-pno
+    identity: hpb-transaction-validation
+    isEnterprise: false
+    weightage: 10
+    duration: 90s
+    enableDataCollection: false
+    values:
+    - name: API_URL_BASE
+      value: http://gateway-service.<+experiment.variables.TARGET_NAMESPACE>:8080/api/v1
+    - name: ACCOUNT_ID
+      value: '1'
+    - name: AUTH_TOKEN
+      value: __BEARER_TOKEN__
+  - name: banking-user-api-check-kc6-kc6
+    identity: banking-user-api-check
+    isEnterprise: false
+    weightage: 10
+    duration: 30s
+    enableDataCollection: false
+    values:
+    - name: AUTH_CREDENTIALS
+      value: __BEARER_TOKEN__
+    - name: URL
+      value: http://gateway-service.<+experiment.variables.TARGET_NAMESPACE>:8080/api/v1/accounts/user/4
+  - name: hpb-transaction-validation-szy-szy
+    identity: hpb-transaction-validation
+    isEnterprise: false
+    weightage: 10
+    duration: 90s
+    enableDataCollection: false
+    values:
+    - name: API_URL_BASE
+      value: http://gateway-service.<+experiment.variables.TARGET_NAMESPACE>:8080/api/v1
+    - name: ACCOUNT_ID
+      value: '1'
+    - name: AUTH_TOKEN
+      value: __BEARER_TOKEN__
+  - name: kafka-topic-message-age-check-3nt-3nt
+    identity: kafka-topic-message-age-check
+    isEnterprise: false
+    weightage: 10
+    duration: 30s
+    enableDataCollection: false
+    values:
+    - name: PROMETHEUSPROBEINPUTS_CONNECTORID
+      value: <+input>
+  - name: hpb-app-kafka-message-error-count-5lb-5lb
+    identity: hpb-app-kafka-message-error-count
+    isEnterprise: false
+    weightage: 10
+    duration: 30s
+    enableDataCollection: false
+    values:
+    - name: PROMETHEUSPROBEINPUTS_CONNECTORID
+      value: <+input>
+  vertices:
+  - name: v-g3t
+    start:
+      probes:
+      - name: hpb-transation-svc-health-check-g2c-g2c
+      - name: hpb-transaction-validation-pno-pno
+    end: {}
+  - name: v-r8w
+    start:
+      probes:
+      - name: hpb-transation-svc-health-check-yoy-yoy
+      - name: banking-user-api-check-kc6-kc6
+      faults:
+      - name: pod-jvm-sql-exception-94o
+    end:
+      probes:
+      - name: hpb-transation-svc-health-check-g2c-g2c
+      - name: hpb-transaction-validation-pno-pno
+  - name: v-9q9
+    start:
+      probes:
+      - name: hpb-transation-svc-health-check-9oj-9oj
+      - name: hpb-transaction-validation-szy-szy
+      - name: kafka-topic-message-age-check-3nt-3nt
+      - name: hpb-app-kafka-message-error-count-5lb-5lb
+    end:
+      probes:
+      - name: hpb-transation-svc-health-check-yoy-yoy
+      - name: banking-user-api-check-kc6-kc6
+      faults:
+      - name: pod-jvm-sql-exception-94o
+  - name: v-end
+    start: {}
+    end:
+      probes:
+      - name: hpb-transation-svc-health-check-9oj-9oj
+      - name: hpb-transaction-validation-szy-szy
+      - name: kafka-topic-message-age-check-3nt-3nt
+      - name: hpb-app-kafka-message-error-count-5lb-5lb
+  cleanupPolicy: delete
+variables:
+- name: TARGET_NAMESPACE
+  value: <+input>
+  type: String
+  required: false
+revision: v1
+isDefault: true

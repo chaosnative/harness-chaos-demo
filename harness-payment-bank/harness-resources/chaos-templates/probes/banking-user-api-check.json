@@ -1,0 +1,38 @@
+{
+  "identity": "banking-user-api-check",
+  "name": "banking-user-api-check",
+  "description": "",
+  "hubRef": "__HUB__",
+  "type": "httpProbe",
+  "infrastructureType": "Kubernetes",
+  "tags": [],
+  "probeProperties": {
+    "httpProbe": {
+      "method": {
+        "get": {
+          "responseCode": "200",
+          "criteria": "=="
+        }
+      },
+      "url": "<+input>",
+      "auth": {
+        "credentials": "<+input>",
+        "type": "Bearer"
+      },
+      "tlsConfig": {
+        "caFile": "",
+        "certFile": "",
+        "keyFile": ""
+      }
+    }
+  },
+  "runProperties": {
+    "timeout": "4s",
+    "interval": "10s",
+    "attempt": 1,
+    "pollingInterval": "10s",
+    "initialDelay": "1s",
+    "verbosity": "debug"
+  },
+  "variables": []
+}

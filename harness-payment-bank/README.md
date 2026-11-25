@@ -61,7 +61,7 @@ Rules:
 | CD / chaos infra id | **`hpbk8s`** | Letters+digits only. Display name `hpb-k8s`. Never `hpb_k8s` or `hpb-k8s` as the identifier |
 | Discovery in Terraform | `harness_service_discovery_agent.workshop` | Name `hpb-discovery-team-N`. Install in `harness-delegate-ng`, SA `chaos-delegate`, cron `0/15 * * * *`, Inclusion `banking-N`, **network trace off**. Force-replace via `terraform_data.discovery_cluster_scope`. |
 | Chaos infra | `hpb-chaos-team-N` | Helm event-watcher name is `event-watcher-hpbk8s` |
-| S3 (workshop TF) | bucket `hpb-demo-tfstate-naren`, key `hpb-harness/terraform.tfstate` | Lock table `hpb-demo-tf-lock` |
+| S3 (workshop TF) | bucket `hpb-demo-tfstate-naren`, key `hpb-harness/terraform.tfstate` | Lock file in the same bucket (`use_lockfile`) |
 | Git branch for `harness-resources/` | `automate_workshop` | Stage 1 EKS may still use `main` |
 | Stage 2 provisioner id | `hpb_harness_resources` | Never reuse `hpb_infrastructure` |
 
@@ -76,7 +76,7 @@ Harness account  <── PAT belongs here (cTU1l…)
         ├── k8s connector     hpb_eks
         ├── environment       hpb
         ├── infra             hpbk8s             → hpb_eks, namespace banking-1
-        ├── prometheus        hpb-prometheus-team-1  → prometheus.banking-1
+        ├── prometheus        hpb-prometheus-team-1  → prometheus.banking-1.svc:80
         ├── discovery         hpb-discovery-team-1  (ns harness-delegate-ng, Inclusion banking-1)
         ├── chaos infra v2    hpb-chaos-team-1
         └── experiment        import from a **workshop** org/account hub template (TF_VAR_experiment_*)
@@ -105,7 +105,7 @@ harness-payment-bank/
 
 ## EKS (`infrastructure/`)
 
-Deploys EKS `hpb-eks`, namespaces `banking-1` … `banking-N`, vendored `hpb-manifest/hpb-k8s` (do not edit), Prometheus per namespace, Postgres DBs, and frontend gateway URL. Terraform files: `main.tf` + `variables.tf`. Typical create **25–40 minutes**; destroy **20–30 minutes**.
+Deploys EKS `hpb-eks`, namespaces `banking-1` … `banking-N`, vendored `hpb-manifest/hpb-k8s`, Prometheus + Grafana per namespace, load-generator, Postgres DBs, and frontend `VITE_API_URL` pointed at `gateway-service-external` (port 80). In-cluster `gateway-service` is ClusterIP:8080. Terraform files: `main.tf` + `variables.tf`. Typical create **25–40 minutes**; destroy **20–30 minutes**.
 
 Optional `TF_VAR_*` (empty export can blank a default — only set what you mean):
 
@@ -114,7 +114,7 @@ Optional `TF_VAR_*` (empty export can blank a default — only set what you mean
 | `aws_region` | `us-east-1` |
 | `cluster_name` | `hpb-eks` |
 | `namespace_prefix` | `banking` |
-| `namespace_count` | `4` |
+| `namespace_count` | `10` |
 | `deploy_apps` | `true` |
 | `manifests_path` | `../hpb-manifest/hpb-k8s` |
 
@@ -293,10 +293,22 @@ kubectl get pods,svc,deploy -n banking-1
 6. If `TF_VAR_experiment_template_identity` and `TF_VAR_experiment_hub_identity` were set, each `team-N` has the imported experiment. Those identities must belong to a hub **in this account**, not PnC.
 7. Run the experiment in `team-1`. Faults stay in `banking-1`.
 
-### D. Tear down
+### D. Tear down projects and namespaces, keep the org and templates
 
-- Workshop only: `terraform destroy` in `harness-resources/` **after** removing `prevent_destroy` on the org if you truly want `workshop` gone. Cluster stays.
-- Everything: destroy harness-resources first, then `infrastructure/`.
+Do this while `hpb-eks` still exists. `terraform destroy` in `harness-resources/` deletes org `workshop`, and the chaos hub and templates are deleted with the org.
+
+```bash
+cd harness-payment-bank/harness-resources
+TF_VAR_manage_team_projects=false TF_VAR_manage_delegate=false terraform apply
+
+cd ../infrastructure
+TF_VAR_manage_namespaces=false terraform apply
+```
+
+That removes the team projects (connectors, environments, infrastructures, discovery) and the `banking-N` namespaces, including their load balancers. The organization, `custom-hub-workshop`, and the experiment templates stay.
+
+The EKS node group is still running, so this does not by itself stop node cost. Scaling the node group to zero also stops anything else on `hpb-eks`. `terraform destroy` in `infrastructure/` deletes the cluster.
+
 - Never destroy EKS because stage 2 failed.
 
 ### Local apply (workshop root)

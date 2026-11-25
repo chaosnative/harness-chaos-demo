@@ -57,20 +57,26 @@ variable "namespace_prefix" {
 }
 
 variable "namespace_count" {
-  description = "Number of namespaces to create"
+  description = "Number of namespaces to create. The POC default is 10. The cap is 15."
   type        = number
-  default     = 4
+  default     = 10
 
   validation {
-    condition     = var.namespace_count >= 1 && var.namespace_count <= 8
-    error_message = "namespace_count must be between 1 and 8."
+    condition     = var.namespace_count >= 1 && var.namespace_count <= 15
+    error_message = "namespace_count must be between 1 and 15."
   }
 }
 
 # --- Application manifests ---
 
+variable "manage_namespaces" {
+  description = "true = create banking-1..N and, when deploy_apps is true, install the bank into each. false = terraform apply deletes those namespaces and the workloads in them, including their load balancers. The EKS cluster and its node group stay, so this does not by itself stop node cost, and it does not touch org workshop or the chaos templates. Set manage_team_projects=false in harness-resources first, while the cluster still exists, so Harness can remove discovery agents and experiments before the namespaces disappear. Do not set this false if another org still runs pods in these namespaces."
+  type        = bool
+  default     = true
+}
+
 variable "deploy_apps" {
-  description = "Whether to apply the local Kubernetes manifests in every namespace"
+  description = "Whether to apply the local Kubernetes manifests in every namespace. Ignored when manage_namespaces is false."
   type        = bool
   default     = true
 }
@@ -90,19 +96,30 @@ variable "node_instance_types" {
 }
 
 variable "node_desired_size" {
-  description = "Desired worker node count"
+  description = "Desired worker node count. 12 x m5.xlarge is sized for the 10-namespace POC, including one 2-core CPU hog."
   type        = number
-  default     = 7
+  default     = 20
 }
 
 variable "node_min_size" {
-  description = "Minimum worker node count"
+  description = "Minimum worker node count. Must stay at or below the live desired count. EKS rejects a minimum above the current desired size."
   type        = number
   default     = 6
 }
 
 variable "node_max_size" {
-  description = "Maximum worker node count"
+  description = "Maximum worker node count. 16 leaves room above the desired 12. Keep this >= node_desired_size >= node_min_size."
   type        = number
-  default     = 8
+  default     = 32
+}
+
+variable "node_disk_size" {
+  description = "Worker root volume size in GiB. The module default of 20 fills up once every node has the bank images."
+  type        = number
+  default     = 50
+
+  validation {
+    condition     = var.node_disk_size >= 50 && var.node_disk_size <= 200
+    error_message = "node_disk_size must be between 50 and 200 GiB."
+  }
 }

@@ -1,0 +1,145 @@
+name: account-svc-java-method-exception
+identity: accountsvcjavamethodexception
+description: Injects a NullPointerException into the getAccountsByUserId method of
+  com.example.account.service.AccountService for 120s. Validates transaction health,
+  transaction integrity, user account API, and Kafka message error counts across pre-fault,
+  during-fault, and post-fault stages.
+tags:
+- hpb
+kind: ChaosExperimentTemplate
+apiVersion: litmuschaos.io/v1beta1
+spec:
+  infraType: KubernetesV2
+  faults:
+  - name: pod-jvm-method-exception-zcw
+    identity: pod-jvm-method-exception
+    revision: v1
+    isEnterprise: true
+    values:
+    - name: TARGET_WORKLOAD_KIND
+      value: deployment
+    - name: TARGET_WORKLOAD_NAMES
+      value: account-service
+    - name: TOTAL_CHAOS_DURATION
+      value: 120
+    - name: POD_AFFECTED_PERCENTAGE
+      value: 100
+    - name: METHOD
+      value: getAccountsByUserId
+    - name: EXCEPTION
+      value: NullPointerException("Hello, NullPointerException!")
+    - name: CLASS
+      value: com.example.account.service.AccountService
+    - name: TARGET_WORKLOAD_NAMESPACE
+      value: <+experiment.variables.TARGET_NAMESPACE>
+    authEnabled: false
+  probes:
+  - name: hpb-transation-svc-health-check-mvx-mvx
+    identity: hpb-transation-svc-health-check
+    isEnterprise: false
+    weightage: 10
+    duration: 30s
+    enableDataCollection: false
+    values:
+    - name: AUTH_CREDENTIALS
+      value: __BEARER_TOKEN__
+    - name: URL
+      value: http://gateway-service.<+experiment.variables.TARGET_NAMESPACE>:8080/api/v1/transactions/account/1?page=0&size=20&sort=createdAt,desc
+  - name: hpb-transation-svc-health-check-yh5-yh5
+    identity: hpb-transation-svc-health-check
+    isEnterprise: false
+    weightage: 10
+    duration: 30s
+    enableDataCollection: false
+    values:
+    - name: URL
+      value: http://gateway-service.<+experiment.variables.TARGET_NAMESPACE>:8080/api/v1/transactions/account/1?page=0&size=20&sort=createdAt,desc
+    - name: AUTH_CREDENTIALS
+      value: __BEARER_TOKEN__
+  - name: hpb-transation-svc-health-check-b7l-b7l
+    identity: hpb-transation-svc-health-check
+    isEnterprise: false
+    weightage: 10
+    duration: 30s
+    enableDataCollection: false
+    values:
+    - name: AUTH_CREDENTIALS
+      value: __BEARER_TOKEN__
+    - name: URL
+      value: http://gateway-service.<+experiment.variables.TARGET_NAMESPACE>:8080/api/v1/transactions/account/1?page=0&size=20&sort=createdAt,desc
+  - name: hpb-transaction-validation-qde-qde
+    identity: hpb-transaction-validation
+    isEnterprise: false
+    weightage: 10
+    duration: 90s
+    enableDataCollection: false
+    values:
+    - name: API_URL_BASE
+      value: http://gateway-service.<+experiment.variables.TARGET_NAMESPACE>:8080/api/v1
+    - name: ACCOUNT_ID
+      value: '1'
+    - name: AUTH_TOKEN
+      value: __BEARER_TOKEN__
+  - name: banking-user-api-check-atm-atm
+    identity: banking-user-api-check
+    isEnterprise: false
+    weightage: 10
+    duration: 30s
+    enableDataCollection: false
+    values:
+    - name: AUTH_CREDENTIALS
+      value: __BEARER_TOKEN__
+    - name: URL
+      value: http://gateway-service.<+experiment.variables.TARGET_NAMESPACE>:8080/api/v1/accounts/user/4
+  - name: kafka-topic-message-age-check-io2-io2
+    identity: kafka-topic-message-age-check
+    isEnterprise: false
+    weightage: 10
+    duration: 30s
+    enableDataCollection: false
+    values:
+    - name: PROMETHEUSPROBEINPUTS_CONNECTORID
+      value: <+input>
+  vertices:
+  - name: v-mxj
+    start:
+      probes:
+      - name: hpb-transation-svc-health-check-mvx-mvx
+    end: {}
+  - name: v-ze0
+    start:
+      probes:
+      - name: hpb-transation-svc-health-check-yh5-yh5
+      - name: hpb-transaction-validation-qde-qde
+      - name: banking-user-api-check-atm-atm
+      faults:
+      - name: pod-jvm-method-exception-zcw
+    end:
+      probes:
+      - name: hpb-transation-svc-health-check-mvx-mvx
+  - name: v-b96
+    start:
+      probes:
+      - name: hpb-transation-svc-health-check-b7l-b7l
+      - name: kafka-topic-message-age-check-io2-io2
+    end:
+      probes:
+      - name: hpb-transation-svc-health-check-yh5-yh5
+      - name: hpb-transaction-validation-qde-qde
+      - name: banking-user-api-check-atm-atm
+      faults:
+      - name: pod-jvm-method-exception-zcw
+  - name: v-end
+    start: {}
+    end:
+      probes:
+      - name: hpb-transation-svc-health-check-b7l-b7l
+      - name: kafka-topic-message-age-check-io2-io2
+  cleanupPolicy: delete
+variables:
+- name: TARGET_NAMESPACE
+  value: <+input>
+  type: String
+  required: true
+revision: v1
+isDefault: true

@@ -1,0 +1,84 @@
+name: emailservice-mongo-exception
+identity: emailservicemongoexception
+description: Injects MongoDB exceptions on the notification_logs collection of the
+  notification database in the notification-service for 90s affecting 100% of transactions.
+  Validates email status and transaction integrity via gateway-service probes.
+tags:
+- hpb
+kind: ChaosExperimentTemplate
+apiVersion: litmuschaos.io/v1beta1
+spec:
+  infraType: KubernetesV2
+  faults:
+  - name: pod-jvm-mongo-exception-ikw
+    identity: pod-jvm-mongo-exception
+    revision: v1
+    isEnterprise: true
+    values:
+    - name: TARGET_WORKLOAD_KIND
+      value: deployment
+    - name: TARGET_WORKLOAD_NAMES
+      value: notification-service
+    - name: TOTAL_CHAOS_DURATION
+      value: 120
+    - name: DATABASE
+      value: notification
+    - name: COLLECTION
+      value: notification_logs
+    - name: TRANSACTION_PERCENTAGE
+      value: 100
+    - name: POD_AFFECTED_PERCENTAGE
+      value: 100
+    - name: TARGET_WORKLOAD_NAMESPACE
+      value: <+experiment.variables.TARGET_NAMESPACE>
+    authEnabled: false
+  probes:
+  - name: hpb-email-status-check-c7e-c7e
+    identity: hpb-email-status-check
+    isEnterprise: false
+    weightage: 10
+    duration: 30s
+    enableDataCollection: false
+    values:
+    - name: API_ENDPOINT
+      value: http://gateway-service.<+experiment.variables.TARGET_NAMESPACE>:8080
+    - name: TOKEN
+      value: __BEARER_TOKEN__
+  - name: hpb-transaction-validation-dhq-dhq
+    identity: hpb-transaction-validation
+    isEnterprise: false
+    weightage: 10
+    duration: 30s
+    enableDataCollection: false
+    values:
+    - name: API_URL_BASE
+      value: http://gateway-service.<+experiment.variables.TARGET_NAMESPACE>:8080/api/v1
+    - name: ACCOUNT_ID
+      value: '1'
+    - name: AUTH_TOKEN
+      value: __BEARER_TOKEN__
+  vertices:
+  - name: v-ime
+    start:
+      probes:
+      - name: hpb-email-status-check-c7e-c7e
+      - name: hpb-transaction-validation-dhq-dhq
+      faults:
+      - name: pod-jvm-mongo-exception-ikw
+    end: {}
+  - name: v-end
+    start: {}
+    end:
+      probes:
+      - name: hpb-email-status-check-c7e-c7e
+      - name: hpb-transaction-validation-dhq-dhq
+      faults:
+      - name: pod-jvm-mongo-exception-ikw
+  cleanupPolicy: delete
+variables:
+- name: TARGET_NAMESPACE
+  value: <+input>
+  type: String
+  required: true
+revision: v1
+isDefault: true

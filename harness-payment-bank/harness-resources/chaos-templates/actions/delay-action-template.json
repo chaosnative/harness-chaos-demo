@@ -1,0 +1,15 @@
+{
+  "identity": "delay-action-template",
+  "name": "delay-action-template",
+  "description": "",
+  "hubRef": "__HUB__",
+  "type": "delay",
+  "infrastructureType": "Kubernetes",
+  "tags": [],
+  "actionProperties": {
+    "delayAction": {
+      "duration": "<+input>"
+    }
+  },
+  "variables": []
+}

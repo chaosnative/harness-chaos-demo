@@ -14,6 +14,7 @@ rules:
 - apiGroups: [""]
   resources:
   - nodes
+  - nodes/metrics
   - nodes/proxy
   - services
   - endpoints
@@ -21,6 +22,7 @@ rules:
   verbs: ["get", "list", "watch"]
 - apiGroups:
   - extensions
+  - networking.k8s.io
   resources:
   - ingresses
   verbs: ["get", "list", "watch"]
@@ -114,7 +116,7 @@ metadata:
 spec:
   type: LoadBalancer
   ports:
-  - port: 9090
+  - port: 80
     targetPort: 9090
     protocol: TCP
     name: web

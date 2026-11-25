@@ -1,0 +1,109 @@
+name: service-restart
+identity: servicerestart
+description: Validates resilience of a service by deleting 100% of its pods for 120s
+  at 60s intervals. Verifies transaction API health, account listing, and user API
+  availability before, during, and after the fault.
+tags:
+- hpb
+kind: ChaosExperimentTemplate
+apiVersion: litmuschaos.io/v1beta1
+spec:
+  infraType: KubernetesV2
+  faults:
+  - name: pod-delete-lal
+    identity: pod-delete
+    revision: v1
+    isEnterprise: true
+    values:
+    - name: TARGET_WORKLOAD_KIND
+      value: deployment
+    - name: POD_AFFECTED_PERCENTAGE
+      value: 100
+    - name: TARGET_WORKLOAD_NAMESPACE
+      value: <+input>
+    - name: TARGET_WORKLOAD_NAMES
+      value: <+input>
+    - name: TOTAL_CHAOS_DURATION
+      value: 120
+    - name: CHAOS_INTERVAL
+      value: 20
+    authEnabled: false
+  probes:
+  - name: hpb-transation-svc-health-check-up0-up0
+    identity: hpb-transation-svc-health-check
+    isEnterprise: false
+    weightage: 10
+    duration: 30s
+    enableDataCollection: false
+    values:
+    - name: URL
+      value: <+input>
+    - name: AUTH_CREDENTIALS
+      value: __BEARER_TOKEN__
+  - name: hpb-transation-svc-health-check-n34-n34
+    identity: hpb-transation-svc-health-check
+    isEnterprise: false
+    weightage: 10
+    duration: 30s
+    enableDataCollection: false
+    values:
+    - name: AUTH_CREDENTIALS
+      value: __BEARER_TOKEN__
+    - name: URL
+      value: <+input>
+  - name: hpb-transation-svc-health-check-50q-50q
+    identity: hpb-transation-svc-health-check
+    isEnterprise: false
+    weightage: 10
+    duration: 30s
+    enableDataCollection: false
+    values:
+    - name: URL
+      value: <+input>
+    - name: AUTH_CREDENTIALS
+      value: __BEARER_TOKEN__
+  - name: banking-user-api-check-u1j-u1j
+    identity: banking-user-api-check
+    isEnterprise: false
+    weightage: 10
+    duration: 30s
+    enableDataCollection: false
+    values:
+    - name: AUTH_CREDENTIALS
+      value: __BEARER_TOKEN__
+    - name: URL
+      value: <+input>
+  vertices:
+  - name: v-n4i
+    start:
+      probes:
+      - name: hpb-transation-svc-health-check-n34-n34
+    end: {}
+  - name: v-lbr
+    start:
+      probes:
+      - name: hpb-transation-svc-health-check-up0-up0
+      - name: banking-user-api-check-u1j-u1j
+      faults:
+      - name: pod-delete-lal
+    end:
+      probes:
+      - name: hpb-transation-svc-health-check-n34-n34
+  - name: v-52f
+    start:
+      probes:
+      - name: hpb-transation-svc-health-check-50q-50q
+    end:
+      probes:
+      - name: hpb-transation-svc-health-check-up0-up0
+      - name: banking-user-api-check-u1j-u1j
+      faults:
+      - name: pod-delete-lal
+  - name: v-end
+    start: {}
+    end:
+      probes:
+      - name: hpb-transation-svc-health-check-50q-50q
+  cleanupPolicy: delete
+revision: v1
+isDefault: true

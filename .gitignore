@@ -20,10 +20,14 @@ override.tf.json
 **/.terraform.tfstate.lock.info
 tfplan
 *.tfplan
+*.env
 
 # harness-resources: commit only Terraform sources
 harness-payment-bank/harness-resources/*
 !harness-payment-bank/harness-resources/main.tf
 !harness-payment-bank/harness-resources/variables.tf
+!harness-payment-bank/harness-resources/sync_chaos_templates.py
+!harness-payment-bank/harness-resources/chaos-templates/
+!harness-payment-bank/harness-resources/chaos-templates/**
 harness-payment-bank/README.md
 

@@ -1,0 +1,49 @@
+{
+  "identity": "kafka-topic-message-age-check",
+  "name": "kafka-topic-message-age-check",
+  "description": "",
+  "hubRef": "__HUB__",
+  "type": "apmProbe",
+  "infrastructureType": "Kubernetes",
+  "tags": [],
+  "probeProperties": {
+    "apmProbe": {
+      "comparator": {
+        "type": "float",
+        "value": "2",
+        "criteria": "<="
+      },
+      "type": "Prometheus",
+      "prometheusProbeInputs": {
+        "connectorID": "<+input>",
+        "query": "avg(sum by(topic) (\n  rate(kafka_message_age_seconds_sum[5m]) / rate(kafka_message_age_seconds_count[5m])\n  and rate(kafka_message_age_seconds_count[5m]) > 0\n))",
+        "tlsConfig": {
+          "insecureSkipVerify": true
+        }
+      }
+    }
+  },
+  "runProperties": {
+    "timeout": "10s",
+    "interval": "2s",
+    "attempt": 1,
+    "pollingInterval": "10s",
+    "initialDelay": "1s",
+    "verbosity": "debug"
+  },
+  "variables": [],
+  "inputs": [
+    {
+      "name": "PROMETHEUSPROBEINPUTS_CONNECTORID",
+      "value": "<+input>",
+      "path": ".probeProperties.apmProbe.prometheusProbeInputs.connectorID",
+      "category": "ProbeProperties",
+      "type": "String",
+      "required": true,
+      "reference": {
+        "kind": "Connector",
+        "type": "Prometheus"
+      }
+    }
+  ]
+}

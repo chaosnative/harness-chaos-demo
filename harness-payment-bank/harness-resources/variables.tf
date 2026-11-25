@@ -23,6 +23,7 @@
 variable "account_id" {
   description = "Harness account ID where org workshop is created. Must match the account that issued HARNESS_PLATFORM_API_KEY. Export TF_VAR_account_id."
   type        = string
+  default     = "cTU1lRSWS2SSRV9phKvuOA"
 }
 
 variable "harness_gateway_endpoint" {
@@ -90,9 +91,22 @@ variable "org_description" {
 }
 
 variable "create_organization" {
-  description = "true = Terraform manages org workshop (create or update). false = look up only. Do NOT set false once the org is already in Terraform state — that plans a destroy of workshop. Org is prevent_destroy."
+  description = "true = Terraform creates and updates org workshop. terraform destroy of this root still deletes the org, and the hub and templates go with it. To drop projects and keep the org, set manage_team_projects=false and apply. Do not set create_organization=false after the org is already in state; that plans a destroy of workshop."
   type        = bool
   default     = true
+}
+
+variable "manage_team_projects" {
+  description = "true = create one Harness project per namespace, with its connector, environment, infrastructure, discovery agent, and prometheus. false = terraform apply deletes those project resources and leaves the organization and chaos templates in place. Do this while the cluster still exists, then set manage_namespaces=false in infrastructure/ so the banking namespaces and their load balancers go away. terraform destroy of this root is a different operation: it deletes the organization too."
+  type        = bool
+  default     = true
+}
+
+variable "probe_bearer_token" {
+  description = "Hardcoded onto AUTH_CREDENTIALS / AUTH_TOKEN like PnC. Prometheus connector stays a probe <+input> picker."
+  type        = string
+  default     = ""
+  sensitive   = true
 }
 
 # --- Target cluster / namespaces ---
@@ -121,12 +135,13 @@ variable "namespace_prefix" {
 }
 
 variable "namespace_count" {
-  type    = number
-  default = 4
+  description = "Expected namespace count. Generates banking-N only when infrastructure state has no namespaces output. The plan fails if that state lists a different count. POC default is 10. Cap is 15, matching infrastructure/."
+  type        = number
+  default     = 10
 
   validation {
-    condition     = var.namespace_count >= 1 && var.namespace_count <= 8
-    error_message = "namespace_count must be between 1 and 8."
+    condition     = var.namespace_count >= 1 && var.namespace_count <= 15
+    error_message = "namespace_count must be between 1 and 15."
   }
 }
 
@@ -279,13 +294,13 @@ variable "aws_connector_name" {
 }
 
 variable "create_prometheus_connectors" {
-  description = "Create one project-level Prometheus connector per team. URLs are http://prometheus.<namespace>.svc:9090 so they cannot be a single org connector."
+  description = "Create one project-level Prometheus connector per team. URLs are http://prometheus.<namespace>.svc:80 so they cannot be a single org connector."
   type        = bool
   default     = true
 }
 
 variable "prometheus_connector_id_prefix" {
-  description = "Identifier becomes <prefix>_<project_id> (e.g. hpb_prometheus_team_1). Empty = <resource_prefix>_prometheus"
+  description = "Identifier becomes <prefix>_<project_id> (e.g. hpb_prometheus_team_1). Display name is hpb-prometheus-team-1. Empty = <resource_prefix>_prometheus"
   type        = string
   default     = ""
 }
@@ -298,7 +313,7 @@ variable "prometheus_connector_name_prefix" {
 
 variable "prometheus_port" {
   type    = number
-  default = 9090
+  default = 80
 }
 
 # --- Per-project environment / infra ---
@@ -465,15 +480,26 @@ variable "apply_chaos_install_command" {
   default     = true
 }
 
-# --- Org experiment templates on the existing custom-hub-workshop ---
-# Looks up the hub; does not create a ChaosHub, probe, or action template.
-# Identities match PnC / the live workshop hub. import {} adopts them.
-# https://registry.terraform.io/providers/harness/harness/latest/docs/resources/chaos_experiment_template
+# --- Org ChaosHub copy onto the existing custom-hub-workshop ---
+# Looks up the hub; does not create a ChaosHub. Copies faults, probes,
+# actions, and experiment templates from source_chaos_org_id / source_chaos_hub_identity.
 
 variable "create_org_chaos_templates" {
-  description = "Manage the ten HPB experiment templates on the existing org ChaosHub (custom-hub-workshop). Does not create a hub. Does not modify projects, connectors, discovery, or chaos infra."
+  description = "Copy faults, probes, actions, and experiment templates from the source ChaosHub (PnC) onto custom-hub-workshop. Tokens are copied in memory and not written to git. Does not delete templates on destroy."
   type        = bool
   default     = true
+}
+
+variable "source_chaos_org_id" {
+  description = "Org whose ChaosHub is copied into workshop."
+  type        = string
+  default     = "PnC"
+}
+
+variable "source_chaos_hub_identity" {
+  description = "Source ChaosHub identity (no org. prefix)."
+  type        = string
+  default     = "custom-hub-PnC"
 }
 
 variable "adopt_existing_org_chaos_templates" {
@@ -483,7 +509,7 @@ variable "adopt_existing_org_chaos_templates" {
 }
 
 variable "chaos_hub_identity" {
-  description = "Existing org-level ChaosHub identity (no org. prefix). Must already exist; Terraform looks it up and does not create a hub."
+  description = "Org ChaosHub identity (no org. prefix). Harness creates this hub when the organization is created. Apply waits until it can be read, and does not create a second hub."
   type        = string
   default     = "custom-hub-workshop"
 

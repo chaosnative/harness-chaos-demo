@@ -1,0 +1,54 @@
+{
+  "identity": "hpb-transaction-validation",
+  "name": "hpb-transaction-validation",
+  "description": "",
+  "hubRef": "__HUB__",
+  "type": "containerProbe",
+  "infrastructureType": "Kubernetes",
+  "tags": [],
+  "probeProperties": {
+    "containerProbe": {
+      "comparator": {
+        "type": "string",
+        "value": "TRANSACTION COMPLETED",
+        "criteria": "contains"
+      },
+      "image": "docker.io/aady12/hpb-verify_transaction-probe:0.0.7",
+      "imagePullPolicy": "IfNotPresent",
+      "command": [
+        "/bin/sh",
+        "-c"
+      ],
+      "args": "/app/verify_transaction.sh",
+      "env": [
+        {
+          "name": "API_URL_BASE",
+          "value": "<+input>"
+        },
+        {
+          "name": "ACCOUNT_ID",
+          "value": "<+input>"
+        },
+        {
+          "name": "AUTH_TOKEN",
+          "value": "<+input>"
+        }
+      ],
+      "namespace": "__DELEGATE_NS__",
+      "serviceAccountName": "default",
+      "affinity": {},
+      "hostNetwork": false,
+      "hostPID": false,
+      "hostIPC": false
+    }
+  },
+  "runProperties": {
+    "timeout": "50s",
+    "interval": "10s",
+    "attempt": 1,
+    "pollingInterval": "10s",
+    "initialDelay": "1s",
+    "verbosity": "debug"
+  },
+  "variables": []
+}
